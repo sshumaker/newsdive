@@ -48,7 +48,12 @@ type Request struct {
 	Messages     []Message     `json:"messages"`
 	Tools        []any         `json:"tools,omitempty"`
 	OutputConfig *OutputConfig `json:"output_config,omitempty"`
+	Thinking     *Thinking     `json:"thinking,omitempty"`
 	betas        []string
+}
+
+type Thinking struct {
+	Type string `json:"type"` // "adaptive" | "disabled"
 }
 
 type OutputConfig struct {

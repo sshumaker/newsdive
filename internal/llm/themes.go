@@ -76,7 +76,7 @@ func (c *Client) SynthesizeThemes(ctx context.Context, model string, items []*st
 
 	resp, err := c.Do(ctx, Request{
 		Model:     model,
-		MaxTokens: 8000,
+		MaxTokens: 24000, // reasoning-heavy synthesis: leave room for adaptive thinking + a large JSON body
 		System:    themesSystem,
 		Messages:  []Message{{Role: "user", Content: "Recent items:\n\n" + sb.String()}},
 		OutputConfig: &OutputConfig{
@@ -88,9 +88,13 @@ func (c *Client) SynthesizeThemes(ctx context.Context, model string, items []*st
 		return nil, err
 	}
 
+	text := resp.Text()
+	if text == "" {
+		return nil, fmt.Errorf("themes: empty response (stop_reason=%s) — reduce the item count or raise max_tokens", resp.StopReason)
+	}
 	var r themesResult
-	if err := json.Unmarshal([]byte(resp.Text()), &r); err != nil {
-		return nil, fmt.Errorf("parse themes: %w", err)
+	if err := json.Unmarshal([]byte(text), &r); err != nil {
+		return nil, fmt.Errorf("parse themes (stop_reason=%s): %w", resp.StopReason, err)
 	}
 
 	valid := map[string]bool{}
