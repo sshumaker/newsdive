@@ -1,0 +1,34 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+  <meta name="theme-color" content="#0e1116" />
+  <title>Signal — research feed</title>
+  <link rel="stylesheet" href="/styles.css" />
+  <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>📡</text></svg>" />
+</head>
+<body>
+  <header class="topbar">
+    <div class="topbar-inner">
+      <div class="brand"><span class="brand-dot"></span> Signal</div>
+      <button id="refreshBtn" class="icon-btn" title="Fetch new items" aria-label="Refresh">⟳</button>
+    </div>
+    <div id="statsBar" class="statsbar"></div>
+  </header>
+
+  <main id="view" class="view"><div class="loading">Loading…</div></main>
+
+  <nav class="tabbar">
+    <button class="tab" data-tab="feed">📰<span>Feed</span></button>
+    <button class="tab" data-tab="themes">🕸<span>Themes</span></button>
+    <button class="tab" data-tab="saved">★<span>Saved</span></button>
+    <button class="tab" data-tab="ask">✦<span>Ask</span></button>
+  </nav>
+
+  <!-- For a split deploy (static frontend on Vercel, Go API on Railway),
+       set this to the API's base URL, e.g. "https://your-app.up.railway.app". -->
+  <script>window.API_BASE = "";</script>
+  <script src="/app.js"></script>
+</body>
+</html>

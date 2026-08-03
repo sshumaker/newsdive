@@ -1,0 +1,17 @@
+# secrets & local data
+.env
+data/
+*.db
+*.db-wal
+*.db-shm
+
+# build artifacts
+/news
+/bin/
+dist/
+
+# node (frontend tooling, if ever added)
+node_modules/
+
+# OS
+.DS_Store

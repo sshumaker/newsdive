@@ -1,0 +1,9 @@
+data/
+bin/
+.env
+*.db
+*.db-wal
+*.db-shm
+.git/
+.DS_Store
+DESIGN.md
