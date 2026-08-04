@@ -58,8 +58,9 @@ type atomLink struct {
 
 var tagRe = regexp.MustCompile(`<[^>]+>`)
 
-// FetchBlogs pulls the newest entries from each curated feed.
-func FetchBlogs(perFeed int) ([]*store.Item, error) {
+// FetchBlogs pulls the newest entries from the built-in feeds plus any
+// user-configured extra feeds.
+func FetchBlogs(perFeed int, extra []store.FeedEntry) ([]*store.Item, error) {
 	if perFeed <= 0 {
 		perFeed = 15
 	}
@@ -69,7 +70,15 @@ func FetchBlogs(perFeed int) ([]*store.Item, error) {
 	var out []*store.Item
 	var firstErr error
 
-	for _, f := range blogFeeds {
+	feeds := make([]struct{ Name, URL string }, 0, len(blogFeeds)+len(extra))
+	feeds = append(feeds, blogFeeds...)
+	for _, e := range extra {
+		if strings.TrimSpace(e.URL) != "" {
+			feeds = append(feeds, struct{ Name, URL string }{Name: orName(e.Name, e.URL), URL: e.URL})
+		}
+	}
+
+	for _, f := range feeds {
 		body, err := get(f.URL)
 		if err != nil {
 			if firstErr == nil {
@@ -146,6 +155,18 @@ func excerpt(s string, max int) string {
 		s = s[:max] + "…"
 	}
 	return s
+}
+
+func orName(name, u string) string {
+	if strings.TrimSpace(name) != "" {
+		return name
+	}
+	u = strings.TrimPrefix(u, "https://")
+	u = strings.TrimPrefix(u, "http://")
+	if i := strings.IndexByte(u, '/'); i >= 0 {
+		u = u[:i]
+	}
+	return u
 }
 
 func parseFeedTime(s string) time.Time {

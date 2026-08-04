@@ -71,7 +71,9 @@ type Result struct {
 }
 
 // FetchAll pulls from every source. perSource caps how many each query returns.
-func FetchAll(perSource int) Result {
+// cfg adds user-configured Bluesky handles and extra RSS/Atom feeds on top of
+// the built-in arXiv/HN/blog sources.
+func FetchAll(perSource int, cfg store.SourcesConfig) Result {
 	var r Result
 	add := func(items []*store.Item, err error) {
 		if err != nil {
@@ -81,6 +83,9 @@ func FetchAll(perSource int) Result {
 	}
 	add(FetchArxiv(perSource))
 	add(FetchHackerNews(perSource))
-	add(FetchBlogs(perSource))
+	add(FetchBlogs(perSource, cfg.ExtraFeeds))
+	if len(cfg.BlueskyHandles) > 0 {
+		add(FetchBluesky(cfg.BlueskyHandles, perSource))
+	}
 	return r
 }

@@ -150,14 +150,14 @@ const selectBase = `SELECT ` + selectCols + ` FROM items i LEFT JOIN themes t ON
 
 func scanItem(rows *sql.Rows) (*Item, error) {
 	var (
-		it                        Item
-		seq                       int64
-		authors, ki, cl, ev, lim  string
-		oq, tags                  string
-		pub, fetched              int64
-		enriched                  int64
-		themeID                   sql.NullInt64
-		themeTitle                sql.NullString
+		it                       Item
+		seq                      int64
+		authors, ki, cl, ev, lim string
+		oq, tags                 string
+		pub, fetched             int64
+		enriched                 int64
+		themeID                  sql.NullInt64
+		themeTitle               sql.NullString
 	)
 	err := rows.Scan(&seq, &it.ID, &it.Source, &it.SourceType, &it.Title, &it.URL,
 		&authors, &pub, &fetched, &it.RawText, &it.Points, &enriched,

@@ -3,15 +3,16 @@ package server
 
 import (
 	"context"
+	"database/sql"
 	"encoding/json"
 	"errors"
-	"database/sql"
 	"log"
 	"net/http"
 	"strconv"
 	"sync"
 	"time"
 
+	"news/internal/agent"
 	"news/internal/config"
 	"news/internal/llm"
 	"news/internal/pipeline"
@@ -20,16 +21,22 @@ import (
 )
 
 type Server struct {
-	st  *store.Store
-	cl  *llm.Client
-	cfg *config.Config
+	st   *store.Store
+	cl   *llm.Client
+	chat *agent.Chat
+	cfg  *config.Config
 
-	mu        sync.Mutex
+	mu         sync.Mutex
 	refreshing bool
 }
 
 func New(st *store.Store, cl *llm.Client, cfg *config.Config) *Server {
-	return &Server{st: st, cl: cl, cfg: cfg}
+	return &Server{
+		st:   st,
+		cl:   cl,
+		chat: agent.NewChat(cfg.AnthropicAPIKey, st, cfg.AskModel),
+		cfg:  cfg,
+	}
 }
 
 func (s *Server) Handler() http.Handler {
@@ -43,6 +50,9 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("GET /api/theme/{id}", s.handleTheme)
 	mux.HandleFunc("GET /api/stats", s.handleStats)
 	mux.HandleFunc("POST /api/ask", s.handleAsk)
+	mux.HandleFunc("POST /api/chat", s.handleChat)
+	mux.HandleFunc("GET /api/sources", s.handleGetSources)
+	mux.HandleFunc("POST /api/sources", s.handleSetSources)
 	mux.HandleFunc("POST /api/refresh", s.handleRefresh)
 
 	// Static SPA (embedded).
@@ -88,7 +98,9 @@ func (s *Server) handleItem(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleSetState(w http.ResponseWriter, r *http.Request) {
-	var body struct{ State string `json:"state"` }
+	var body struct {
+		State string `json:"state"`
+	}
 	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
 		http.Error(w, "bad body", http.StatusBadRequest)
 		return
@@ -107,7 +119,9 @@ func (s *Server) handleSetState(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleFeedback(w http.ResponseWriter, r *http.Request) {
-	var body struct{ Feedback int `json:"feedback"` }
+	var body struct {
+		Feedback int `json:"feedback"`
+	}
 	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
 		http.Error(w, "bad body", http.StatusBadRequest)
 		return
@@ -160,7 +174,9 @@ func (s *Server) handleStats(w http.ResponseWriter, r *http.Request) {
 // ---------- ask ----------
 
 func (s *Server) handleAsk(w http.ResponseWriter, r *http.Request) {
-	var body struct{ Question string `json:"question"` }
+	var body struct {
+		Question string `json:"question"`
+	}
 	if err := json.NewDecoder(r.Body).Decode(&body); err != nil || body.Question == "" {
 		http.Error(w, "question required", http.StatusBadRequest)
 		return
@@ -195,6 +211,52 @@ func (s *Server) handleAsk(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, ans)
+}
+
+// ---------- chat (Managed Agents) ----------
+
+func (s *Server) handleChat(w http.ResponseWriter, r *http.Request) {
+	var body struct {
+		SessionID string            `json:"session_id"`
+		Message   string            `json:"message"`
+		Context   agent.PageContext `json:"context"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil || body.Message == "" {
+		http.Error(w, "message required", http.StatusBadRequest)
+		return
+	}
+	ctx, cancel := context.WithTimeout(r.Context(), 5*time.Minute)
+	defer cancel()
+
+	reply, err := s.chat.Send(ctx, body.SessionID, body.Message, body.Context)
+	if err != nil {
+		if reply != nil && reply.Text != "" {
+			writeJSON(w, reply)
+			return
+		}
+		fail(w, err)
+		return
+	}
+	writeJSON(w, reply)
+}
+
+// ---------- sources config ----------
+
+func (s *Server) handleGetSources(w http.ResponseWriter, r *http.Request) {
+	writeJSON(w, s.st.GetSourcesConfig())
+}
+
+func (s *Server) handleSetSources(w http.ResponseWriter, r *http.Request) {
+	var cfg store.SourcesConfig
+	if err := json.NewDecoder(r.Body).Decode(&cfg); err != nil {
+		http.Error(w, "bad body", http.StatusBadRequest)
+		return
+	}
+	if err := s.st.SetSourcesConfig(cfg); err != nil {
+		fail(w, err)
+		return
+	}
+	writeJSON(w, s.st.GetSourcesConfig())
 }
 
 // ---------- refresh ----------

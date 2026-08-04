@@ -66,7 +66,7 @@ func (c *Chat) agentTools() []any {
 		},
 		map[string]any{
 			"type": "custom", "name": "read_current_topic",
-			"description": "Read the full details of the item or theme the reader is currently viewing (title, summary, key ideas, claims, evidence, limitations, open questions, or a theme's synthesis). Call this first to understand what the reader means by 'this'.",
+			"description":  "Read the full details of the item or theme the reader is currently viewing (title, summary, key ideas, claims, evidence, limitations, open questions, or a theme's synthesis). Call this first to understand what the reader means by 'this'.",
 			"input_schema": map[string]any{"type": "object", "properties": map[string]any{}},
 		},
 		map[string]any{

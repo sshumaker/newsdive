@@ -1,11 +1,12 @@
 # Signal — a personal LLM/agents research newsreader
 
-Signal ingests recent work on LLMs, agents, harnesses, coding agents,
+newsdive ingests recent work on LLMs, agents, harnesses, coding agents,
 inference-time compute, tool use, and program synthesis from **arXiv, Hacker
-News, and research blogs**; uses Claude to **summarize, extract, and score**
-each item; **groups related work into themes** with cross-paper synthesis; and
-serves a **mobile-first** reading UI with search and a **tool-using research
-agent** that can follow up on the actual sources on the web.
+News, research blogs, and Bluesky**; uses Claude to **summarize, extract, and
+score** each item; **groups related work into themes** with cross-paper
+synthesis; and serves a **mobile-first** reading UI with search and a
+**page-aware chat agent** (built on Anthropic **Managed Agents**) you can pop
+open anywhere to talk about what you're looking at.
 
 It's a single Go binary (with an embedded web UI) backed by SQLite. No external
 services beyond the Anthropic API.
@@ -13,7 +14,8 @@ services beyond the Anthropic API.
 ## What it does
 
 - **Ingest** — pulls candidate items from arXiv (topical searches), the Hacker
-  News Algolia API, and a curated set of research blogs (RSS/Atom).
+  News Algolia API, a curated set of research blogs (RSS/Atom), and any
+  **Bluesky** accounts + extra feeds you configure in the settings panel (⚙).
 - **Enrich** — for each item Claude writes a one-liner + summary and extracts
   **key ideas, claims, evidence, limitations, and open questions**, plus tags
   and 0–100 scores for **relevance / novelty / importance**.
@@ -25,10 +27,12 @@ services beyond the Anthropic API.
 - **Read** — scan a ranked feed, tap into a full breakdown, **save / dismiss /
   mark read / thumbs up-down**, and browse by theme. Links back to every source.
 - **Search** — full-text (SQLite FTS5) over titles, summaries, ideas, and tags.
-- **Ask** — a research agent (Claude + `web_search` + `web_fetch` + a
-  `search_corpus` tool over your collection) that answers natural-language
-  questions by grounding in your items and then **reading the real sources on
-  the web**, with citations.
+- **Chat (✦ FAB)** — a page-aware chat agent built on Anthropic **Managed
+  Agents**. Tap the floating button on any screen; it knows whether you're on an
+  item, a theme, or the feed. Tools: `read_current_topic` (the item/theme you're
+  viewing), `search_corpus` (related work in your collection), and
+  `web_search`/`web_fetch` (the real sources on the public web). Each chat is a
+  stateful Managed Agents session.
 
 See [DESIGN.md](DESIGN.md) for the architecture and the decisions behind it.
 
@@ -58,7 +62,8 @@ news ingest           fetch new items from all sources (no API key needed)
 news enrich [N]       summarize/score up to N unenriched items (default 200)
 news themes           re-cluster recent items into themes
 news all              ingest + enrich + themes (one full cycle)
-news ask "question"   ask the research agent from the CLI
+news chat "message" [itemID]   talk to the Managed Agents chat agent from the CLI
+news ask "question"   one-shot research answer (web + corpus) from the CLI
 news stats            print collection stats
 ```
 

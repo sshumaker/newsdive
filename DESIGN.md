@@ -69,22 +69,30 @@ transparent, tunable formula in `store/rank.go` (relevance-weighted base + a
 ranking deterministic and inspectable beats a black-box score, and recency stays
 fresh because the score is recomputed at read time.
 
-**The "ask" agent uses server-side tools, not the full Managed Agents runtime.**
-The intent behind "give the agent tools to follow up on stuff" is that Q&A
-shouldn't be limited to the summaries already on hand — it should read the
-actual sources. The agent (`internal/llm/ask.go`) runs a tool-use loop with:
-- `search_corpus` (client-side) — searches your collection so answers are
-  grounded in what you follow;
-- `web_search` + `web_fetch` (Anthropic server-side tools) — to pull up and read
-  the real papers/posts and fill gaps or get newer info.
+**Two agent surfaces: a Managed Agents chat, and a one-shot `ask`.**
 
-This delivers the follow-up capability with far less moving parts than the
-Managed Agents session/container/event-stream runtime, which is aimed at
-long-lived stateful agents with a bash/file sandbox — more than a stateless
-research-Q&A endpoint needs. If it ever grows into a persistent, scheduled
-agent with its own workspace, Managed Agents is the natural upgrade and the loop
-here maps onto it directly. The loop degrades gracefully: if web tools aren't
-enabled on the account, it retries corpus-only.
+The primary conversational surface is a **page-aware chat** built on Anthropic
+**Managed Agents** (`internal/agent`). A single persisted agent + reusable
+environment are created once and cached in the `settings` table; each chat is a
+stateful **session**. The agent has three tools:
+- `read_current_topic` (custom, client-side) — reads the item or theme the
+  reader is currently viewing. The frontend sends the current page context with
+  every message, so "this paper" / "this theme" resolves correctly.
+- `search_corpus` (custom, client-side) — related work already in the collection.
+- `web_search` + `web_fetch` (built-in Managed Agents toolset) — the real
+  sources on the public web.
+
+Managed Agents fits the chat use case: it owns the agent loop and session state,
+so multi-turn conversations "just work" and the agent is a versioned, reusable
+object. The Go side is a small raw-HTTP client (`internal/agent/client.go`) plus
+an orchestrator that polls the session event stream and answers custom-tool
+calls (`chat.go`) — matching the app's dependency-light style. Event-type
+strings are matched by suffix so minor naming differences don't break parsing.
+
+A lighter **one-shot `ask`** (`internal/llm/ask.go`) also remains — a single
+Messages-API tool loop (`search_corpus` + `web_search` + `web_fetch`) exposed on
+the CLI and `/api/ask`. It's handy for a quick cited answer without a session,
+and degrades to corpus-only if web tools aren't enabled on the account.
 
 **Model choice.** Batch enrichment and theme clustering default to
 `claude-sonnet-5` (high volume → cost matters, and structured extraction is well
@@ -105,6 +113,12 @@ fields (summary, key_ideas, claims, evidence, limitations, open_questions, tags)
 the three scores, reader `state` (unread/read/saved/dismissed) and `feedback`
 (−1/0/+1), and a `theme_id`. `themes`: title, description, and the three
 synthesis fields. `items_fts`: FTS5 over title + body + tags.
+
+A small `settings` key/value table holds the cached Managed Agents agent/env IDs
+and the user-editable **sources config** (`sources_config`): Bluesky handles and
+extra RSS/Atom feeds, managed from the settings panel and merged on top of the
+built-in arXiv/HN/blog sources at ingest time. Bluesky posts come from the
+public AppView API (`app.bsky.feed.getAuthorFeed`) — no key required.
 
 Re-theming is a full atomic replace (`ReplaceThemes`) — themes are a derived
 view of the current collection, so recomputing them wholesale is simpler and

@@ -26,13 +26,13 @@ type hnResponse struct {
 }
 
 type hnHit struct {
-	ObjectID  string `json:"objectID"`
-	Title     string `json:"title"`
-	URL       string `json:"url"`
-	Author    string `json:"author"`
-	Points    int    `json:"points"`
-	CreatedAtI int64 `json:"created_at_i"`
-	StoryText string `json:"story_text"`
+	ObjectID   string `json:"objectID"`
+	Title      string `json:"title"`
+	URL        string `json:"url"`
+	Author     string `json:"author"`
+	Points     int    `json:"points"`
+	CreatedAtI int64  `json:"created_at_i"`
+	StoryText  string `json:"story_text"`
 }
 
 // FetchHackerNews queries the Algolia HN API for recent, sufficiently-upvoted

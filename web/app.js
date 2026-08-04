@@ -8,6 +8,8 @@ const view = document.getElementById("view");
 let currentTab = "feed";
 let feedState = { source: "", q: "" };
 let searchTimer = null;
+// What the chat agent should treat as "the current page".
+let currentContext = { kind: "feed", id: "", title: "" };
 
 // ---------- api helpers ----------
 async function api(path, opts) {
@@ -34,7 +36,8 @@ function relTime(iso) {
   if (s < 86400 * 30) return Math.floor(s / 86400) + "d";
   return d.toLocaleDateString(undefined, { month: "short", day: "numeric" });
 }
-function sourceLabel(t) { return { arxiv: "arXiv", hackernews: "Hacker News", blog: "Blog" }[t] || t; }
+function sourceLabel(t) { return { arxiv: "arXiv", hackernews: "Hacker News", blog: "Blog", bluesky: "Bluesky" }[t] || t; }
+function truncStr(s, n) { s = String(s || ""); return s.length > n ? s.slice(0, n) + "…" : s; }
 function toast(msg) {
   let el = document.querySelector(".toast");
   if (!el) { el = document.createElement("div"); el.className = "toast"; document.body.appendChild(el); }
@@ -90,8 +93,8 @@ function itemCard(it) {
 
 // ---------- feed view ----------
 async function renderFeed(saved) {
-  const chips = ["", "arxiv", "hackernews", "blog"];
-  const chipLabels = { "": "All", arxiv: "arXiv", hackernews: "HN", blog: "Blogs" };
+  const chips = ["", "arxiv", "hackernews", "blog", "bluesky"];
+  const chipLabels = { "": "All", arxiv: "arXiv", hackernews: "HN", blog: "Blogs", bluesky: "Bluesky" };
   const controls = saved ? "" : `<div class="controls">
     <div class="search"><input id="q" type="search" placeholder="Search your collection…" value="${esc(feedState.q)}" /></div>
     <div class="chips">${chips.map((c) =>
@@ -145,6 +148,8 @@ async function openItem(id) {
   let it;
   try { it = await api("/api/item/" + encodeURIComponent(id)); }
   catch (e) { view.innerHTML = `<div class="empty">Error: ${esc(e.message)}</div>`; return; }
+
+  currentContext = { kind: "item", id: it.id, title: it.title };
 
   // Mark read on open (best-effort).
   if (it.state === "unread") { post(`/api/item/${id}/state`, { state: "read" }).catch(() => {}); }
@@ -232,6 +237,7 @@ async function openTheme(id) {
   window.scrollTo(0, 0);
   try {
     const t = await api("/api/theme/" + id);
+    currentContext = { kind: "theme", id: String(t.id), title: t.title };
     const synth = `<div class="synth">
       ${t.connections ? `<h4>Connections</h4><p>${esc(t.connections)}</p>` : ""}
       ${t.disagreements ? `<h4>Disagreements</h4><p>${esc(t.disagreements)}</p>` : ""}
@@ -250,59 +256,129 @@ async function openTheme(id) {
   } catch (e) { view.innerHTML = `<div class="empty">Error: ${esc(e.message)}</div>`; }
 }
 
-// ---------- ask ----------
-const askExamples = [
-  "What are the latest approaches to inference-time compute?",
-  "Summarize recent work on coding agents and where it's heading.",
-  "What do my sources disagree about regarding agent memory?",
-];
-let lastAsk = "";
-function renderAsk() {
-  view.innerHTML = `<div class="ask-box">
-      <textarea id="askInput" placeholder="Ask across your collection — the agent searches your items, then reads the actual sources on the web to answer.">${esc(lastAsk)}</textarea>
-      <button id="askBtn" class="ask-btn">✦ Ask the research agent</button>
-      <div class="ask-hint">Uses web search + fetch to follow up on real sources. Can take up to a minute.</div>
-      <div class="examples">${askExamples.map((e) => `<button class="example">${esc(e)}</button>`).join("")}</div>
-    </div>
-    <div id="answer"></div>`;
-  const input = document.getElementById("askInput");
-  const btn = document.getElementById("askBtn");
-  view.querySelectorAll(".example").forEach((e) =>
-    e.addEventListener("click", () => { input.value = e.textContent; input.focus(); }));
-  btn.addEventListener("click", () => runAsk(input.value.trim()));
-  input.addEventListener("keydown", (ev) => {
-    if ((ev.metaKey || ev.ctrlKey) && ev.key === "Enter") runAsk(input.value.trim());
+// ---------- chat (FAB, Managed Agents) ----------
+let chat = { id: null, messages: [], ctxKey: null, ctx: null };
+function ctxKeyOf(c) { return c.kind + ":" + c.id; }
+
+function openChat() {
+  const ctx = { ...currentContext };
+  // Start a fresh conversation when the topic changes.
+  if (chat.ctxKey !== ctxKeyOf(ctx)) chat = { id: null, messages: [], ctxKey: ctxKeyOf(ctx), ctx };
+  chat.ctx = ctx;
+  const label = (ctx.kind === "item" || ctx.kind === "theme") ? "· " + truncStr(ctx.title, 42) : "· your feed";
+  document.getElementById("chatContext").textContent = label;
+  renderChat();
+  openOverlay("chatOverlay");
+  setTimeout(() => document.getElementById("chatInput").focus(), 250);
+}
+function renderChat() {
+  const box = document.getElementById("chatMessages");
+  if (!chat.messages.length) {
+    const hint = (chat.ctx && (chat.ctx.kind === "item" || chat.ctx.kind === "theme"))
+      ? `Ask anything about <b>${esc(truncStr(chat.ctx.title, 60))}</b> — I can read it, find related work in your collection, and search the web.`
+      : `Ask across your collection — I can search your items, pull related work, and search the web.`;
+    box.innerHTML = `<div class="chat-empty">${hint}</div>`;
+    return;
+  }
+  box.innerHTML = chat.messages.map((m) => {
+    if (m.role === "user") return `<div class="msg user">${esc(m.text)}</div>`;
+    if (m.role === "thinking") return `<div class="msg bot thinking"><span class="pulse"></span> thinking…</div>`;
+    return `<div class="msg bot">${mdLite(m.text)}</div>`;
+  }).join("");
+  box.scrollTop = box.scrollHeight;
+}
+async function sendChat() {
+  const input = document.getElementById("chatInput");
+  const q = input.value.trim();
+  if (!q) return;
+  input.value = ""; input.style.height = "auto";
+  chat.messages.push({ role: "user", text: q });
+  chat.messages.push({ role: "thinking" });
+  renderChat();
+  document.getElementById("chatSend").disabled = true;
+  try {
+    const r = await post("/api/chat", { session_id: chat.id, message: q, context: chat.ctx });
+    chat.id = r.session_id;
+    chat.messages.pop();
+    chat.messages.push({ role: "bot", text: r.text || "(no reply)" });
+  } catch (e) {
+    chat.messages.pop();
+    chat.messages.push({ role: "bot", text: "Error: " + e.message });
+  } finally {
+    document.getElementById("chatSend").disabled = false;
+    renderChat();
+  }
+}
+
+// ---------- settings (sources) ----------
+let sources = { bluesky_handles: [], extra_feeds: [] };
+async function openSettings() {
+  openOverlay("settingsOverlay");
+  const body = document.getElementById("settingsBody");
+  body.innerHTML = `<div class="chat-empty">Loading…</div>`;
+  try {
+    sources = await api("/api/sources");
+    sources.bluesky_handles = sources.bluesky_handles || [];
+    sources.extra_feeds = sources.extra_feeds || [];
+    renderSettings();
+  } catch (e) { body.innerHTML = `<div class="chat-empty">Error: ${esc(e.message)}</div>`; }
+}
+function renderSettings() {
+  const bsky = sources.bluesky_handles.map((h, i) =>
+    `<span class="editchip">@${esc(h)}<button data-rm-bsky="${i}">✕</button></span>`).join("");
+  const feeds = sources.extra_feeds.map((f, i) =>
+    `<span class="editchip">${esc(f.name || f.url)}<button data-rm-feed="${i}">✕</button></span>`).join("");
+  document.getElementById("settingsBody").innerHTML = `
+    <h4>Bluesky accounts</h4>
+    <p class="hint">Follow people's posts. Enter a handle like <code>simonwillison.net</code> (or paste a profile URL).</p>
+    <div class="chip-row">${bsky || '<span class="hint">None yet.</span>'}</div>
+    <div class="add-row"><input id="bskyInput" placeholder="handle.bsky.social" /><button id="bskyAdd">Add</button></div>
+
+    <h4>Extra RSS / Atom feeds</h4>
+    <p class="hint">Add any blog feed on top of the built-in list.</p>
+    <div class="chip-row">${feeds || '<span class="hint">None yet.</span>'}</div>
+    <div class="add-row"><input id="feedInput" placeholder="https://blog.example.com/feed.xml" /><button id="feedAdd">Add</button></div>
+
+    <button class="settings-save" id="sourcesSave">Save sources</button>
+    <p class="hint" style="margin-top:10px">After saving, tap ⟳ to fetch from the new sources.</p>`;
+
+  const b = document.getElementById("settingsBody");
+  b.querySelectorAll("[data-rm-bsky]").forEach((x) => x.addEventListener("click", () => {
+    sources.bluesky_handles.splice(+x.dataset.rmBsky, 1); renderSettings();
+  }));
+  b.querySelectorAll("[data-rm-feed]").forEach((x) => x.addEventListener("click", () => {
+    sources.extra_feeds.splice(+x.dataset.rmFeed, 1); renderSettings();
+  }));
+  const addBsky = () => {
+    const v = document.getElementById("bskyInput").value.trim();
+    if (v) { sources.bluesky_handles.push(v.replace(/^@/, "")); renderSettings(); }
+  };
+  const addFeed = () => {
+    const v = document.getElementById("feedInput").value.trim();
+    if (v) { sources.extra_feeds.push({ name: "", url: v }); renderSettings(); }
+  };
+  document.getElementById("bskyAdd").addEventListener("click", addBsky);
+  document.getElementById("feedAdd").addEventListener("click", addFeed);
+  document.getElementById("bskyInput").addEventListener("keydown", (e) => { if (e.key === "Enter") addBsky(); });
+  document.getElementById("feedInput").addEventListener("keydown", (e) => { if (e.key === "Enter") addFeed(); });
+  document.getElementById("sourcesSave").addEventListener("click", async () => {
+    try { await post("/api/sources", sources); toast("Sources saved"); closeOverlay("settingsOverlay"); }
+    catch (e) { toast("Error: " + e.message); }
   });
 }
-async function runAsk(q) {
-  if (!q) return;
-  lastAsk = q;
-  const ansEl = document.getElementById("answer");
-  const btn = document.getElementById("askBtn");
-  btn.disabled = true;
-  ansEl.innerHTML = `<div class="thinking"><span class="pulse"></span> Researching — searching your collection and the web…</div>`;
-  try {
-    const a = await post("/api/ask", { question: q });
-    const cites = (a.citations || []).length
-      ? `<div class="cites"><h4>Sources from your collection</h4>${a.citations.map((c) =>
-          `<a href="${esc(c.url)}" target="_blank" rel="noopener">${esc(c.title)} — ${esc(c.source)}</a>`).join("")}</div>` : "";
-    ansEl.innerHTML = `<div class="answer">${mdLite(a.text)}${cites}
-      <div class="ask-hint" style="margin-top:12px">${a.turns} research step${a.turns === 1 ? "" : "s"}${a.used_web ? " · web enabled" : " · corpus only"}</div>
-    </div>`;
-  } catch (e) {
-    ansEl.innerHTML = `<div class="answer">Error: ${esc(e.message)}</div>`;
-  } finally { btn.disabled = false; }
-}
+
+function openOverlay(id) { document.getElementById(id).classList.add("open"); }
+function closeOverlay(id) { document.getElementById(id).classList.remove("open"); }
 
 // ---------- tabs / routing ----------
 function switchTab(tab, keepState) {
   currentTab = tab;
+  currentContext = { kind: "feed", id: "", title: "" };
   document.querySelectorAll(".tab").forEach((t) => t.classList.toggle("active", t.dataset.tab === tab));
   window.scrollTo(0, 0);
   if (tab === "feed") renderFeed(false);
   else if (tab === "saved") renderFeed(true);
   else if (tab === "themes") renderThemes();
-  else if (tab === "ask") renderAsk();
 }
 document.querySelectorAll(".tab").forEach((t) =>
   t.addEventListener("click", () => switchTab(t.dataset.tab)));
@@ -316,6 +392,23 @@ document.getElementById("refreshBtn").addEventListener("click", async (e) => {
     toast(r.status === "started" ? "Fetching new items…" : "Refresh already running");
   } catch (err) { toast("Error: " + err.message); }
   setTimeout(() => { btn.classList.remove("spin"); loadStats(); }, 4000);
+});
+
+// FAB + chat wiring
+document.getElementById("fab").addEventListener("click", openChat);
+document.getElementById("chatClose").addEventListener("click", () => closeOverlay("chatOverlay"));
+document.getElementById("chatSend").addEventListener("click", sendChat);
+const chatInput = document.getElementById("chatInput");
+chatInput.addEventListener("input", () => { chatInput.style.height = "auto"; chatInput.style.height = Math.min(chatInput.scrollHeight, 120) + "px"; });
+chatInput.addEventListener("keydown", (e) => { if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); sendChat(); } });
+
+// Settings wiring
+document.getElementById("settingsBtn").addEventListener("click", openSettings);
+document.getElementById("settingsClose").addEventListener("click", () => closeOverlay("settingsOverlay"));
+
+// Close sheets on backdrop tap
+["chatOverlay", "settingsOverlay"].forEach((id) => {
+  document.getElementById(id).addEventListener("click", (e) => { if (e.target.id === id) closeOverlay(id); });
 });
 
 // init

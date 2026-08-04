@@ -4,15 +4,18 @@
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
   <meta name="theme-color" content="#0e1116" />
-  <title>Signal — research feed</title>
+  <title>newsdive — research feed</title>
   <link rel="stylesheet" href="/styles.css" />
   <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>📡</text></svg>" />
 </head>
 <body>
   <header class="topbar">
     <div class="topbar-inner">
-      <div class="brand"><span class="brand-dot"></span> Signal</div>
-      <button id="refreshBtn" class="icon-btn" title="Fetch new items" aria-label="Refresh">⟳</button>
+      <div class="brand"><span class="brand-dot"></span> newsdive</div>
+      <div class="topbar-actions">
+        <button id="settingsBtn" class="icon-btn" title="Sources & settings" aria-label="Settings">⚙</button>
+        <button id="refreshBtn" class="icon-btn" title="Fetch new items" aria-label="Refresh">⟳</button>
+      </div>
     </div>
     <div id="statsBar" class="statsbar"></div>
   </header>
@@ -23,8 +26,36 @@
     <button class="tab" data-tab="feed">📰<span>Feed</span></button>
     <button class="tab" data-tab="themes">🕸<span>Themes</span></button>
     <button class="tab" data-tab="saved">★<span>Saved</span></button>
-    <button class="tab" data-tab="ask">✦<span>Ask</span></button>
   </nav>
+
+  <!-- Floating chat button — pops on any view, aware of the current page. -->
+  <button id="fab" class="fab" aria-label="Chat about this">✦</button>
+
+  <!-- Chat bottom-sheet -->
+  <div id="chatOverlay" class="overlay">
+    <div class="sheet chat-sheet">
+      <div class="sheet-head">
+        <div class="sheet-title">Chat <span id="chatContext" class="sheet-context"></span></div>
+        <button id="chatClose" class="icon-btn" aria-label="Close">✕</button>
+      </div>
+      <div id="chatMessages" class="chat-messages"></div>
+      <div class="chat-input">
+        <textarea id="chatInput" rows="1" placeholder="Ask about this…"></textarea>
+        <button id="chatSend" class="chat-send" aria-label="Send">↑</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- Settings / sources bottom-sheet -->
+  <div id="settingsOverlay" class="overlay">
+    <div class="sheet">
+      <div class="sheet-head">
+        <div class="sheet-title">Sources</div>
+        <button id="settingsClose" class="icon-btn" aria-label="Close">✕</button>
+      </div>
+      <div id="settingsBody" class="settings-body"></div>
+    </div>
+  </div>
 
   <!-- For a split deploy (static frontend on Vercel, Go API on Railway),
        set this to the API's base URL, e.g. "https://your-app.up.railway.app". -->

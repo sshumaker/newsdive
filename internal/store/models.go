@@ -45,13 +45,13 @@ type Item struct {
 // Theme is a cluster of related items with cross-item synthesis: what connects
 // them, where they disagree, and how the idea is trending.
 type Theme struct {
-	ID           int64     `json:"id"`
-	Title        string    `json:"title"`
-	Description  string    `json:"description"`
-	Connections  string    `json:"connections"`
-	Disagreements string   `json:"disagreements"`
-	Trajectory   string    `json:"trajectory"`
-	ItemCount    int       `json:"item_count"`
-	UpdatedAt    time.Time `json:"updated_at"`
-	Items        []*Item   `json:"items,omitempty"`
+	ID            int64     `json:"id"`
+	Title         string    `json:"title"`
+	Description   string    `json:"description"`
+	Connections   string    `json:"connections"`
+	Disagreements string    `json:"disagreements"`
+	Trajectory    string    `json:"trajectory"`
+	ItemCount     int       `json:"item_count"`
+	UpdatedAt     time.Time `json:"updated_at"`
+	Items         []*Item   `json:"items,omitempty"`
 }
