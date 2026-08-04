@@ -85,7 +85,29 @@ CREATE TABLE IF NOT EXISTS themes (
 );
 
 CREATE VIRTUAL TABLE IF NOT EXISTS items_fts USING fts5(title, body, tags);
+
+CREATE TABLE IF NOT EXISTS settings (
+  key   TEXT PRIMARY KEY,
+  value TEXT NOT NULL
+);
 `)
+	return err
+}
+
+// GetSetting returns a stored value and whether it was present.
+func (s *Store) GetSetting(key string) (string, bool) {
+	var v string
+	err := s.db.QueryRow(`SELECT value FROM settings WHERE key=?`, key).Scan(&v)
+	if err != nil {
+		return "", false
+	}
+	return v, true
+}
+
+// SetSetting upserts a key/value setting.
+func (s *Store) SetSetting(key, value string) error {
+	_, err := s.db.Exec(`INSERT INTO settings(key,value) VALUES(?,?)
+		ON CONFLICT(key) DO UPDATE SET value=excluded.value`, key, value)
 	return err
 }
 

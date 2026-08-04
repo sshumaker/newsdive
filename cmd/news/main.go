@@ -15,6 +15,7 @@ import (
 	"syscall"
 	"time"
 
+	"news/internal/agent"
 	"news/internal/config"
 	"news/internal/ingest"
 	"news/internal/llm"
@@ -119,6 +120,26 @@ func main() {
 		}
 		fmt.Printf("\n[%d research steps, web=%v, %d in / %d out tokens]\n",
 			ans.Turns, ans.UsedWeb, ans.Usage.InputTokens, ans.Usage.OutputTokens)
+
+	case "chat":
+		needsKey()
+		if len(os.Args) < 3 {
+			log.Fatal(`usage: news chat "message" [itemID for context]`)
+		}
+		page := agent.PageContext{Kind: "feed"}
+		if len(os.Args) > 3 {
+			if it, err := st.Get(os.Args[3]); err == nil {
+				page = agent.PageContext{Kind: "item", ID: it.ID, Title: it.Title}
+			}
+		}
+		ch := agent.NewChat(cfg.AnthropicAPIKey, st, cfg.AskModel)
+		cctx, cancel := context.WithTimeout(ctx, 5*time.Minute)
+		defer cancel()
+		r, err := ch.Send(cctx, "", os.Args[2], page)
+		if err != nil && (r == nil || r.Text == "") {
+			log.Fatalf("chat: %v", err)
+		}
+		fmt.Printf("\n[session %s]\n%s\n", r.SessionID, r.Text)
 
 	case "stats":
 		s, err := st.Stats()
