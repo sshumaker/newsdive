@@ -115,7 +115,9 @@ async function renderFeed(saved) {
       feedState.unread = !feedState.unread; renderFeed(false);
     });
   }
-  loadList(saved);
+  // Awaited so the router restores scroll against the finished list rather than
+  // the empty placeholder, where the page is too short and the scroll clamps to 0.
+  await loadList(saved);
 }
 
 async function loadList(saved) {
@@ -136,7 +138,7 @@ async function loadList(saved) {
     }
     list.innerHTML = items.map(itemCard).join("");
     list.querySelectorAll(".card").forEach((c) =>
-      c.addEventListener("click", () => openItem(c.dataset.id)));
+      c.addEventListener("click", () => go("item", c.dataset.id)));
   } catch (e) {
     list.innerHTML = `<div class="empty">Error: ${esc(e.message)}</div>`;
   }
@@ -162,8 +164,8 @@ function sectionList(title, arr, dim) {
   return `<div class="section ${dim ? "dim" : ""}"><h4>${title}</h4><ul>${arr.map((x) => `<li>${esc(x)}</li>`).join("")}</ul></div>`;
 }
 async function openItem(id) {
+  // Scroll is the router's job (it restores the list position on back).
   view.innerHTML = `<div class="loading">Loading…</div>`;
-  window.scrollTo(0, 0);
   let it;
   try { it = await api("/api/item/" + encodeURIComponent(id)); }
   catch (e) { view.innerHTML = `<div class="empty">Error: ${esc(e.message)}</div>`; return; }
@@ -210,9 +212,9 @@ async function openItem(id) {
       </div>
     </div>`;
 
-  view.querySelector(".back").addEventListener("click", () => switchTab(currentTab, true));
+  view.querySelector(".back").addEventListener("click", () => back(currentTab));
   const themeA = document.getElementById("themeLink");
-  if (themeA) themeA.addEventListener("click", (e) => { e.preventDefault(); openTheme(it.theme_id); });
+  if (themeA) themeA.addEventListener("click", (e) => { e.preventDefault(); go("theme", it.theme_id); });
 
   view.querySelectorAll(".act").forEach((btn) => btn.addEventListener("click", async () => {
     const act = btn.dataset.act;
@@ -227,7 +229,9 @@ async function openItem(id) {
         loadStats();
       } else if (act === "dismiss") {
         await post(`/api/item/${id}/state`, { state: "dismissed" });
-        toast("Dismissed"); switchTab(currentTab, true); loadStats();
+        // Replace rather than push: a dismissed item shouldn't sit in history
+        // waiting for the back button to resurrect it.
+        toast("Dismissed"); go(currentTab, "", "", { replace: true }); loadStats();
       } else if (act === "up" || act === "down") {
         const val = act === "up" ? 1 : -1;
         const on = btn.classList.contains("on");
@@ -259,7 +263,7 @@ async function renderThemes() {
         <div class="count">${t.item_count} item${t.item_count === 1 ? "" : "s"}${t.starred ? " · pinned" : ""}</div>
       </div>`).join("");
     view.querySelectorAll(".theme-card").forEach((c) =>
-      c.addEventListener("click", () => openTheme(parseInt(c.dataset.id, 10))));
+      c.addEventListener("click", () => go("theme", c.dataset.id)));
     view.querySelectorAll("[data-star]").forEach((b) =>
       b.addEventListener("click", (e) => { e.stopPropagation(); toggleStar(b); }));
   } catch (e) { view.innerHTML = `<div class="empty">Error: ${esc(e.message)}</div>`; }
@@ -279,7 +283,6 @@ async function toggleStar(btn) {
 
 async function openTheme(id) {
   view.innerHTML = `<div class="loading">Loading…</div>`;
-  window.scrollTo(0, 0);
   try {
     const t = await api("/api/theme/" + id);
     currentContext = { kind: "theme", id: String(t.id), title: t.title };
@@ -297,7 +300,7 @@ async function openTheme(id) {
         <div class="section"><h4>${t.item_count} items</h4></div>
         <div id="list">${(t.items || []).map(itemCard).join("")}</div>
       </div>`;
-    view.querySelector(".back").addEventListener("click", () => switchTab("themes", true));
+    view.querySelector(".back").addEventListener("click", () => back("themes"));
     view.querySelectorAll(".card").forEach((c) => c.addEventListener("click", () => openItem(c.dataset.id)));
   } catch (e) { view.innerHTML = `<div class="empty">Error: ${esc(e.message)}</div>`; }
 }
@@ -493,7 +496,7 @@ function renderSettings() {
   document.getElementById("bskyInput").addEventListener("keydown", (e) => { if (e.key === "Enter") addBsky(); });
   document.getElementById("feedInput").addEventListener("keydown", (e) => { if (e.key === "Enter") addFeed(); });
   document.getElementById("sourcesSave").addEventListener("click", async () => {
-    try { await post("/api/sources", sources); toast("Sources saved"); closeOverlay("settingsOverlay"); }
+    try { await post("/api/sources", sources); toast("Sources saved"); closeSheet(); }
     catch (e) { toast("Error: " + e.message); }
   });
 }
@@ -501,18 +504,138 @@ function renderSettings() {
 function openOverlay(id) { document.getElementById(id).classList.add("open"); }
 function closeOverlay(id) { document.getElementById(id).classList.remove("open"); }
 
-// ---------- tabs / routing ----------
-function switchTab(tab, keepState) {
-  currentTab = tab;
-  currentContext = { kind: "feed", id: "", title: "" };
-  document.querySelectorAll(".tab").forEach((t) => t.classList.toggle("active", t.dataset.tab === tab));
-  window.scrollTo(0, 0);
-  if (tab === "feed") renderFeed(false);
-  else if (tab === "saved") renderFeed(true);
-  else if (tab === "themes") renderThemes();
+// ---------- routing ----------
+// Hash-based, so every view is deep-linkable and survives a reload. Paths would
+// need a server-side SPA fallback; the Go binary serves the embedded files
+// directly, so /item/<id> would 404.
+//
+// Sheets get their own history entry (#/item/x/chat), which makes the back
+// gesture close the sheet instead of leaving the page — what a phone user
+// expects.
+const OVERLAY_ROUTES = { chat: "chatOverlay", settings: "settingsOverlay" };
+const LIST_VIEWS = ["feed", "saved", "themes"];
+const DETAIL_VIEWS = ["item", "theme"]; // views whose second segment is an id
+
+// Starts as a sentinel, not "feed": the first applyRoute() must register as a
+// change so the initial view actually renders. Defaulting this to feed made a
+// plain load of "/" (already #/feed) a no-op and left the page blank.
+let route = { view: "", id: "", overlay: "" };
+let renderToken = 0;   // guards against a slow render landing after a faster nav
+let navDepth = 0;      // how many in-app entries we've pushed, for safe back()
+const scrollPos = new Map();
+
+function parseHash(hash) {
+  const parts = String(hash || "").replace(/^#\/?/, "").split("/").filter(Boolean);
+  let overlay = "";
+  const last = parts[parts.length - 1];
+  if (OVERLAY_ROUTES[last]) {
+    // Only treat the last segment as a sheet if what remains is itself a
+    // complete route. Otherwise "#/item/chat" (an item whose id happens to be
+    // "chat") would parse as the chat sheet with no item.
+    const rest = parts.slice(0, -1);
+    const complete = rest.length === 0 ||
+      (DETAIL_VIEWS.includes(rest[0]) ? rest.length === 2 : rest.length === 1);
+    if (complete) { overlay = last; parts.pop(); }
+  }
+  return {
+    view: parts[0] || "feed",
+    id: parts[1] ? decodeURIComponent(parts[1]) : "",
+    overlay,
+  };
 }
+
+function hashFor(view, id, overlay) {
+  let h = "#/" + view;
+  if (id) h += "/" + encodeURIComponent(id);
+  if (overlay) h += "/" + overlay;
+  return h;
+}
+
+// baseKey ignores the overlay so opening a sheet doesn't lose the list's scroll.
+const baseKey = (r) => r.view + "/" + r.id;
+
+function go(view, id, overlay, opts) {
+  const next = hashFor(view, id, overlay || "");
+  if (location.hash === next) return;
+  scrollPos.set(baseKey(route), window.scrollY);
+  if (opts && opts.replace) {
+    history.replaceState(null, "", next); // does not fire hashchange
+    applyRoute();
+    return;
+  }
+  navDepth++;
+  location.hash = next; // fires hashchange -> applyRoute
+}
+
+// back returns to the previous in-app view, or falls back to a list when this
+// entry was a deep link (where history.back() would leave the app entirely).
+function back(fallbackView) {
+  if (navDepth > 0) { navDepth--; history.back(); return; }
+  go(fallbackView || "feed", "", "", { replace: true });
+}
+
+async function applyRoute() {
+  const prev = route;
+  const next = parseHash(location.hash);
+  route = next;
+
+  const baseChanged = prev.view !== next.view || prev.id !== next.id;
+  if (baseChanged) {
+    if (LIST_VIEWS.includes(next.view)) {
+      currentTab = next.view;
+      // openItem/openTheme set this; leaving it stale would point the chat
+      // agent at an article the reader has already navigated away from.
+      currentContext = { kind: "feed", id: "", title: "" };
+    } else if (next.view === "theme") currentTab = "themes";
+    highlightTab();
+
+    const token = ++renderToken;
+    await renderRoute(next);
+    if (token !== renderToken) return; // a newer navigation already won
+    // One frame after paint, so the restored offset lands against real layout.
+    const y = scrollPos.get(baseKey(next)) || 0;
+    requestAnimationFrame(() => { if (token === renderToken) window.scrollTo(0, y); });
+  }
+  // Sheets sync after the base view renders, so a deep link like
+  // #/item/x/chat opens the chat with the item's context already set.
+  syncOverlays(next.overlay);
+}
+
+async function renderRoute(r) {
+  switch (r.view) {
+    case "saved":  return renderFeed(true);
+    case "themes": return renderThemes();
+    case "item":   return openItem(r.id);
+    case "theme":  return openTheme(parseInt(r.id, 10));
+    default:       return renderFeed(false);
+  }
+}
+
+function highlightTab() {
+  document.querySelectorAll(".tab").forEach((t) =>
+    t.classList.toggle("active", t.dataset.tab === currentTab));
+}
+
+function syncOverlays(name) {
+  for (const [key, id] of Object.entries(OVERLAY_ROUTES)) {
+    const el = document.getElementById(id);
+    const open = el.classList.contains("open");
+    if (key === name && !open) {
+      if (key === "chat") openChat(); else openSettings();
+    } else if (key !== name && open) {
+      closeOverlay(id);
+    }
+  }
+}
+
+// Sheet controls navigate rather than toggling classes, so history stays in step.
+const openSheet  = (name) => go(route.view, route.id, name);
+const closeSheet = () => (route.overlay ? back(currentTab) : syncOverlays(""));
+
+window.addEventListener("hashchange", applyRoute);
+
 document.querySelectorAll(".tab").forEach((t) =>
-  t.addEventListener("click", () => switchTab(t.dataset.tab)));
+  t.addEventListener("click", () => go(t.dataset.tab)));
 
 // refresh
 document.getElementById("refreshBtn").addEventListener("click", async (e) => {
@@ -526,22 +649,30 @@ document.getElementById("refreshBtn").addEventListener("click", async (e) => {
 });
 
 // FAB + chat wiring
-document.getElementById("fab").addEventListener("click", openChat);
-document.getElementById("chatClose").addEventListener("click", () => closeOverlay("chatOverlay"));
+document.getElementById("fab").addEventListener("click", () => openSheet("chat"));
+document.getElementById("chatClose").addEventListener("click", closeSheet);
 document.getElementById("chatSend").addEventListener("click", sendChat);
 const chatInput = document.getElementById("chatInput");
 chatInput.addEventListener("input", () => { chatInput.style.height = "auto"; chatInput.style.height = Math.min(chatInput.scrollHeight, 120) + "px"; });
 chatInput.addEventListener("keydown", (e) => { if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); sendChat(); } });
 
 // Settings wiring
-document.getElementById("settingsBtn").addEventListener("click", openSettings);
-document.getElementById("settingsClose").addEventListener("click", () => closeOverlay("settingsOverlay"));
+document.getElementById("settingsBtn").addEventListener("click", () => openSheet("settings"));
+document.getElementById("settingsClose").addEventListener("click", closeSheet);
 
 // Close sheets on backdrop tap
 ["chatOverlay", "settingsOverlay"].forEach((id) => {
-  document.getElementById(id).addEventListener("click", (e) => { if (e.target.id === id) closeOverlay(id); });
+  document.getElementById(id).addEventListener("click", (e) => { if (e.target.id === id) closeSheet(); });
 });
 
-// init
+// Escape closes the top sheet, matching the back gesture.
+document.addEventListener("keydown", (e) => {
+  if (e.key === "Escape" && route.overlay) closeSheet();
+});
+
+// init — render whatever the URL asks for, so a reload or a shared link lands
+// on the same view. Normalize a bare "/" to #/feed so the first entry is a real
+// route and back behaves predictably from the start.
 loadStats();
-switchTab("feed");
+if (!location.hash) history.replaceState(null, "", hashFor("feed", "", ""));
+applyRoute();
