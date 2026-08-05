@@ -7,6 +7,7 @@ package store
 import (
 	"database/sql"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -90,8 +91,92 @@ CREATE TABLE IF NOT EXISTS settings (
   key   TEXT PRIMARY KEY,
   value TEXT NOT NULL
 );
+
+-- One chat thread per topic (an item, a theme, or the feed). Keyed by topic
+-- rather than by session so a server restart resumes the Managed Agents session
+-- instead of silently orphaning it and starting over.
+CREATE TABLE IF NOT EXISTS conversations (
+  topic         TEXT PRIMARY KEY,      -- "item:<id>" | "theme:<key>" | "feed"
+  item_id       TEXT NOT NULL DEFAULT '',
+  title         TEXT NOT NULL DEFAULT '',
+  session_id    TEXT NOT NULL,
+  turns         INTEGER NOT NULL DEFAULT 0,
+  last_activity INTEGER NOT NULL DEFAULT 0,
+  summary       TEXT NOT NULL DEFAULT '',
+  summarized_at INTEGER NOT NULL DEFAULT 0
+);
+CREATE INDEX IF NOT EXISTS idx_conv_item ON conversations(item_id);
+CREATE INDEX IF NOT EXISTS idx_conv_idle ON conversations(last_activity);
 `)
+	if err != nil {
+		return err
+	}
+	return s.migrateThemeKeys()
+}
+
+// migrateThemeKeys adds the stable-key and starred columns to `themes`. Themes
+// were previously rebuilt wholesale on every clustering run with AUTOINCREMENT
+// ids, so a starred flag had nothing durable to hang on and bookmarked theme
+// URLs pointed at a different theme after each run. The key is derived from the
+// title, which is what actually identifies a theme across re-clusterings.
+//
+// CREATE TABLE IF NOT EXISTS can't add columns to an existing table, so these
+// run as explicit idempotent ALTERs (duplicate-column errors are the expected
+// no-op on an already-migrated database).
+func (s *Store) migrateThemeKeys() error {
+	for _, stmt := range []string{
+		`ALTER TABLE themes ADD COLUMN key TEXT NOT NULL DEFAULT ''`,
+		`ALTER TABLE themes ADD COLUMN starred INTEGER NOT NULL DEFAULT 0`,
+	} {
+		if _, err := s.db.Exec(stmt); err != nil && !strings.Contains(err.Error(), "duplicate column") {
+			return fmt.Errorf("migrate themes: %w", err)
+		}
+	}
+	// Backfill keys for themes that predate the column, then enforce uniqueness.
+	rows, err := s.db.Query(`SELECT id, title FROM themes WHERE key=''`)
+	if err != nil {
+		return err
+	}
+	type row struct {
+		id    int64
+		title string
+	}
+	var pending []row
+	for rows.Next() {
+		var r row
+		if err := rows.Scan(&r.id, &r.title); err != nil {
+			rows.Close()
+			return err
+		}
+		pending = append(pending, r)
+	}
+	rows.Close()
+	for _, r := range pending {
+		if _, err := s.db.Exec(`UPDATE themes SET key=? WHERE id=?`, ThemeKey(r.title), r.id); err != nil {
+			return err
+		}
+	}
+	_, err = s.db.Exec(`CREATE UNIQUE INDEX IF NOT EXISTS idx_themes_key ON themes(key)`)
 	return err
+}
+
+// ThemeKey derives a theme's stable identity from its title. Re-clusterings
+// reword titles slightly, so the key is aggressively normalized: lowercased,
+// non-alphanumerics collapsed to single hyphens.
+func ThemeKey(title string) string {
+	var b strings.Builder
+	lastHyphen := true // suppresses a leading hyphen
+	for _, r := range strings.ToLower(strings.TrimSpace(title)) {
+		switch {
+		case (r >= 'a' && r <= 'z') || (r >= '0' && r <= '9'):
+			b.WriteRune(r)
+			lastHyphen = false
+		case !lastHyphen:
+			b.WriteByte('-')
+			lastHyphen = true
+		}
+	}
+	return strings.TrimSuffix(b.String(), "-")
 }
 
 // GetSetting returns a stored value and whether it was present.
@@ -356,9 +441,9 @@ func (s *Store) SetFeedback(id string, fb int) error {
 
 func (s *Store) Themes() ([]*Theme, error) {
 	rows, err := s.db.Query(`
-		SELECT t.id,t.title,t.description,t.connections,t.disagreements,t.trajectory,t.updated_at,
+		SELECT t.id,t.key,t.starred,t.title,t.description,t.connections,t.disagreements,t.trajectory,t.updated_at,
 		       (SELECT COUNT(*) FROM items i WHERE i.theme_id=t.id) AS cnt
-		FROM themes t ORDER BY cnt DESC, t.updated_at DESC`)
+		FROM themes t ORDER BY t.starred DESC, cnt DESC, t.updated_at DESC`)
 	if err != nil {
 		return nil, err
 	}
@@ -367,7 +452,7 @@ func (s *Store) Themes() ([]*Theme, error) {
 	for rows.Next() {
 		var t Theme
 		var updated int64
-		if err := rows.Scan(&t.ID, &t.Title, &t.Description, &t.Connections, &t.Disagreements, &t.Trajectory, &updated, &t.ItemCount); err != nil {
+		if err := rows.Scan(&t.ID, &t.Key, &t.Starred, &t.Title, &t.Description, &t.Connections, &t.Disagreements, &t.Trajectory, &updated, &t.ItemCount); err != nil {
 			return nil, err
 		}
 		t.UpdatedAt = fromUnix(updated)
@@ -379,8 +464,8 @@ func (s *Store) Themes() ([]*Theme, error) {
 func (s *Store) ThemeWithItems(id int64) (*Theme, error) {
 	var t Theme
 	var updated int64
-	err := s.db.QueryRow(`SELECT id,title,description,connections,disagreements,trajectory,updated_at FROM themes WHERE id=?`, id).
-		Scan(&t.ID, &t.Title, &t.Description, &t.Connections, &t.Disagreements, &t.Trajectory, &updated)
+	err := s.db.QueryRow(`SELECT id,key,starred,title,description,connections,disagreements,trajectory,updated_at FROM themes WHERE id=?`, id).
+		Scan(&t.ID, &t.Key, &t.Starred, &t.Title, &t.Description, &t.Connections, &t.Disagreements, &t.Trajectory, &updated)
 	if err != nil {
 		return nil, err
 	}
@@ -404,30 +489,106 @@ type ThemeInput struct {
 	ItemIDs       []string
 }
 
-// ReplaceThemes atomically clears existing themes and installs a fresh set,
-// assigning each item to its first-listed (primary) theme.
-func (s *Store) ReplaceThemes(themes []ThemeInput) error {
+// SetItemTheme files a single item under a theme without re-clustering.
+func (s *Store) SetItemTheme(itemID string, themeID int64) error {
+	_, err := s.db.Exec(`UPDATE items SET theme_id=? WHERE id=?`, themeID, itemID)
+	return err
+}
+
+// StarredThemes returns the themes the reader has pinned, which survive
+// re-clustering. Used to tell the clusterer which themes it must keep.
+func (s *Store) StarredThemes() ([]*Theme, error) {
+	rows, err := s.db.Query(`SELECT id, key, title, description, connections, disagreements, trajectory, updated_at
+		FROM themes WHERE starred=1 ORDER BY title`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	out := []*Theme{}
+	for rows.Next() {
+		var t Theme
+		var updated int64
+		if err := rows.Scan(&t.ID, &t.Key, &t.Title, &t.Description, &t.Connections,
+			&t.Disagreements, &t.Trajectory, &updated); err != nil {
+			return nil, err
+		}
+		t.UpdatedAt = time.Unix(updated, 0)
+		t.Starred = true
+		out = append(out, t2p(t))
+	}
+	return out, rows.Err()
+}
+
+func t2p(t Theme) *Theme { return &t }
+
+// SetThemeStarred pins or unpins a theme. A pinned theme keeps its identity
+// across clustering runs; see SyncThemes.
+func (s *Store) SetThemeStarred(id int64, starred bool) error {
+	v := 0
+	if starred {
+		v = 1
+	}
+	res, err := s.db.Exec(`UPDATE themes SET starred=? WHERE id=?`, v, id)
+	if err != nil {
+		return err
+	}
+	if n, _ := res.RowsAffected(); n == 0 {
+		return sql.ErrNoRows
+	}
+	return nil
+}
+
+// SyncThemes installs a freshly clustered set of themes, preserving the identity
+// of starred ones.
+//
+// This replaces a wholesale DELETE + re-INSERT. Themes are matched by their
+// stable key (derived from the title), so a starred theme keeps its row id —
+// bookmarked URLs and the star itself survive — while absorbing whatever items
+// the new clustering assigned to it and taking the regenerated synthesis text.
+// Unstarred themes are still rebuilt from scratch each run.
+func (s *Store) SyncThemes(themes []ThemeInput) error {
 	tx, err := s.db.Begin()
 	if err != nil {
 		return err
 	}
 	defer tx.Rollback()
 
+	// Item→theme assignment is recomputed from scratch every run, including for
+	// starred themes: "keep the theme" means keep its identity and let current
+	// items join it, not freeze last run's membership.
 	if _, err := tx.Exec(`UPDATE items SET theme_id=NULL`); err != nil {
 		return err
 	}
-	if _, err := tx.Exec(`DELETE FROM themes`); err != nil {
+	if _, err := tx.Exec(`DELETE FROM themes WHERE starred=0`); err != nil {
 		return err
 	}
+
 	now := time.Now().Unix()
 	assigned := map[string]bool{}
+	seen := map[string]bool{}
 	for _, th := range themes {
-		res, err := tx.Exec(`INSERT INTO themes(title,description,connections,disagreements,trajectory,updated_at) VALUES(?,?,?,?,?,?)`,
-			th.Title, th.Description, th.Connections, th.Disagreements, th.Trajectory, now)
-		if err != nil {
+		key := ThemeKey(th.Title)
+		if key == "" || seen[key] {
+			continue // a title that normalizes to nothing, or a duplicate this run
+		}
+		seen[key] = true
+
+		// Upsert on the stable key: updates a surviving starred row in place,
+		// inserts otherwise. Starred is never written here, so pinning sticks.
+		if _, err := tx.Exec(`
+			INSERT INTO themes(key,title,description,connections,disagreements,trajectory,updated_at)
+			VALUES(?,?,?,?,?,?,?)
+			ON CONFLICT(key) DO UPDATE SET
+				title=excluded.title, description=excluded.description,
+				connections=excluded.connections, disagreements=excluded.disagreements,
+				trajectory=excluded.trajectory, updated_at=excluded.updated_at`,
+			key, th.Title, th.Description, th.Connections, th.Disagreements, th.Trajectory, now); err != nil {
 			return err
 		}
-		id, _ := res.LastInsertId()
+		var id int64
+		if err := tx.QueryRow(`SELECT id FROM themes WHERE key=?`, key).Scan(&id); err != nil {
+			return err
+		}
 		for _, itemID := range th.ItemIDs {
 			if assigned[itemID] {
 				continue // primary theme wins
@@ -438,6 +599,9 @@ func (s *Store) ReplaceThemes(themes []ThemeInput) error {
 			assigned[itemID] = true
 		}
 	}
+
+	// A starred theme the clusterer didn't return this run keeps its row (the
+	// reader asked for it) but ends up with no items until one matches again.
 	return tx.Commit()
 }
 
@@ -449,6 +613,119 @@ func (s *Store) RecentEnriched(limit int) ([]*Item, error) {
 	}
 	defer rows.Close()
 	return collect(rows)
+}
+
+// ---------- conversations ----------
+
+// Conversation is one chat thread about a topic. The transcript itself lives in
+// the Managed Agents session (retrievable via its event list); this row is the
+// durable pointer to it plus the rolled-up summary.
+type Conversation struct {
+	Topic        string    `json:"topic"`
+	ItemID       string    `json:"item_id,omitempty"`
+	Title        string    `json:"title,omitempty"`
+	SessionID    string    `json:"session_id"`
+	Turns        int       `json:"turns"`
+	LastActivity time.Time `json:"last_activity"`
+	Summary      string    `json:"summary,omitempty"`
+	SummarizedAt time.Time `json:"summarized_at,omitempty"`
+}
+
+// UpsertConversation records (or refreshes) the session backing a topic and
+// bumps its activity clock. Writing the summary to '' on a new turn is
+// deliberate: the existing digest is stale the moment the reader says more.
+func (s *Store) UpsertConversation(topic, itemID, title, sessionID string) error {
+	_, err := s.db.Exec(`
+		INSERT INTO conversations(topic,item_id,title,session_id,turns,last_activity)
+		VALUES(?,?,?,?,1,?)
+		ON CONFLICT(topic) DO UPDATE SET
+			session_id=excluded.session_id,
+			item_id=excluded.item_id,
+			title=excluded.title,
+			turns=conversations.turns+1,
+			last_activity=excluded.last_activity,
+			summary='', summarized_at=0`,
+		topic, itemID, title, sessionID, time.Now().Unix())
+	return err
+}
+
+// ConversationSession returns the session id previously used for a topic, so a
+// restarted server resumes the thread instead of orphaning it.
+func (s *Store) ConversationSession(topic string) (string, bool) {
+	var id string
+	if err := s.db.QueryRow(`SELECT session_id FROM conversations WHERE topic=?`, topic).Scan(&id); err != nil {
+		return "", false
+	}
+	return id, id != ""
+}
+
+// ConversationForItem returns the chat digest attached to an item, if any.
+func (s *Store) ConversationForItem(itemID string) (*Conversation, error) {
+	c, err := s.scanConversation(s.db.QueryRow(`
+		SELECT topic,item_id,title,session_id,turns,last_activity,summary,summarized_at
+		FROM conversations WHERE item_id=? AND summary!=''`, itemID))
+	if errors.Is(err, sql.ErrNoRows) {
+		return nil, nil
+	}
+	return c, err
+}
+
+// ConversationForTopic returns the digest for any topic key (an item, theme, or
+// the feed), if one has been written.
+func (s *Store) ConversationForTopic(topic string) (*Conversation, error) {
+	c, err := s.scanConversation(s.db.QueryRow(`
+		SELECT topic,item_id,title,session_id,turns,last_activity,summary,summarized_at
+		FROM conversations WHERE topic=? AND summary!=''`, topic))
+	if errors.Is(err, sql.ErrNoRows) {
+		return nil, nil
+	}
+	return c, err
+}
+
+// StaleConversations returns conversations that have been idle at least
+// idleFor and have no current summary — the work list for the digest sweep.
+func (s *Store) StaleConversations(idleFor time.Duration, limit int) ([]*Conversation, error) {
+	cutoff := time.Now().Add(-idleFor).Unix()
+	rows, err := s.db.Query(`
+		SELECT topic,item_id,title,session_id,turns,last_activity,summary,summarized_at
+		FROM conversations
+		WHERE summary='' AND last_activity>0 AND last_activity<=? AND turns>0
+		ORDER BY last_activity LIMIT ?`, cutoff, limit)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	out := []*Conversation{}
+	for rows.Next() {
+		c, err := s.scanConversation(rows)
+		if err != nil {
+			return nil, err
+		}
+		out = append(out, c)
+	}
+	return out, rows.Err()
+}
+
+// SaveConversationSummary stores a digest. It is a no-op if the conversation has
+// moved on since the sweep read it (last_activity changed), so a slow summary
+// can't overwrite a fresher exchange with a stale digest.
+func (s *Store) SaveConversationSummary(topic, summary string, readAt time.Time) error {
+	_, err := s.db.Exec(`UPDATE conversations SET summary=?, summarized_at=? WHERE topic=? AND last_activity=?`,
+		summary, time.Now().Unix(), topic, readAt.Unix())
+	return err
+}
+
+type scanner interface{ Scan(...any) error }
+
+func (s *Store) scanConversation(row scanner) (*Conversation, error) {
+	var c Conversation
+	var last, summed int64
+	if err := row.Scan(&c.Topic, &c.ItemID, &c.Title, &c.SessionID, &c.Turns, &last, &c.Summary, &summed); err != nil {
+		return nil, err
+	}
+	c.LastActivity = fromUnix(last)
+	c.SummarizedAt = fromUnix(summed)
+	return &c, nil
 }
 
 // ---------- stats ----------

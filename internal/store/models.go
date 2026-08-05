@@ -40,12 +40,18 @@ type Item struct {
 
 	ThemeID    *int64  `json:"theme_id,omitempty"`
 	ThemeTitle *string `json:"theme_title,omitempty"`
+
+	// Conversation is the digest of the reader's chat about this item, attached
+	// on single-item reads once the thread has gone idle and been summarized.
+	Conversation *Conversation `json:"conversation,omitempty"`
 }
 
 // Theme is a cluster of related items with cross-item synthesis: what connects
 // them, where they disagree, and how the idea is trending.
 type Theme struct {
-	ID            int64     `json:"id"`
+	ID    int64  `json:"id"`
+	Key   string `json:"key"`     // stable identity across re-clusterings (slug of title)
+	Starred bool `json:"starred"` // pinned by the reader; survives re-clustering
 	Title         string    `json:"title"`
 	Description   string    `json:"description"`
 	Connections   string    `json:"connections"`
@@ -54,4 +60,7 @@ type Theme struct {
 	ItemCount     int       `json:"item_count"`
 	UpdatedAt     time.Time `json:"updated_at"`
 	Items         []*Item   `json:"items,omitempty"`
+
+	// Conversation is the digest of the reader's chat about this theme.
+	Conversation *Conversation `json:"conversation,omitempty"`
 }

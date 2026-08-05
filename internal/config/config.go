@@ -32,6 +32,9 @@ type Config struct {
 	// with backoff, so this can sit well above what the rate limit sustains.
 	EnrichWorkers int
 
+	// How often to sweep for idle chat threads to summarize. Zero disables it.
+	DigestEvery time.Duration
+
 	// Interests describe what "relevant" means for this reader.
 	Interests string
 }
@@ -70,6 +73,7 @@ func Load() (*Config, error) {
 
 	mins := getenvInt("NEWS_REFRESH_MINUTES", 0)
 	c.RefreshEvery = time.Duration(mins) * time.Minute
+	c.DigestEvery = time.Duration(getenvInt("NEWS_DIGEST_MINUTES", 15)) * time.Minute
 
 	return c, nil
 }

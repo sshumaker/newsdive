@@ -23,23 +23,31 @@ import (
 )
 
 type Server struct {
-	st   *store.Store
-	cl   *llm.Client
-	chat *agent.Chat
-	cfg  *config.Config
+	st       *store.Store
+	cl       *llm.Client
+	chat     *agent.Chat
+	digester *agent.Digester
+	cfg      *config.Config
 
 	mu         sync.Mutex
 	refreshing bool
 }
 
 func New(st *store.Store, cl *llm.Client, cfg *config.Config) *Server {
+	chat := agent.NewChat(cfg.AnthropicAPIKey, st, cfg.AskModel).
+		WithEnrichment(cl, agent.EnrichConfig{Model: cfg.EnrichModel, Interests: cfg.Interests})
 	return &Server{
-		st:   st,
-		cl:   cl,
-		chat: agent.NewChat(cfg.AnthropicAPIKey, st, cfg.AskModel),
-		cfg:  cfg,
+		st:       st,
+		cl:       cl,
+		chat:     chat,
+		digester: agent.NewDigester(chat, cl, cfg.EnrichModel),
+		cfg:      cfg,
 	}
 }
+
+// Digester exposes the conversation summarizer so the server owner can run its
+// scheduler alongside the ingest one.
+func (s *Server) Digester() *agent.Digester { return s.digester }
 
 func (s *Server) Handler() http.Handler {
 	mux := http.NewServeMux()
@@ -50,6 +58,8 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("POST /api/item/{id}/feedback", s.handleFeedback)
 	mux.HandleFunc("GET /api/themes", s.handleThemes)
 	mux.HandleFunc("GET /api/theme/{id}", s.handleTheme)
+	mux.HandleFunc("POST /api/theme/{id}/star", s.handleStarTheme)
+	mux.HandleFunc("POST /api/articles", s.handleAddArticle)
 	mux.HandleFunc("GET /api/stats", s.handleStats)
 	mux.HandleFunc("POST /api/ask", s.handleAsk)
 	mux.HandleFunc("POST /api/chat", s.handleChat)
@@ -96,7 +106,50 @@ func (s *Server) handleItem(w http.ResponseWriter, r *http.Request) {
 		fail(w, err)
 		return
 	}
+	// Attach the chat digest, if the reader has talked about this item and the
+	// thread has since gone idle long enough to be summarized.
+	if cv, err := s.st.ConversationForItem(it.ID); err == nil && cv != nil {
+		it.Conversation = cv
+	}
 	writeJSON(w, it)
+}
+
+func (s *Server) handleStarTheme(w http.ResponseWriter, r *http.Request) {
+	var body struct {
+		Starred bool `json:"starred"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+		http.Error(w, "bad body", http.StatusBadRequest)
+		return
+	}
+	id, err := strconv.ParseInt(r.PathValue("id"), 10, 64)
+	if err != nil {
+		http.Error(w, "bad theme id", http.StatusBadRequest)
+		return
+	}
+	if err := s.st.SetThemeStarred(id, body.Starred); errors.Is(err, sql.ErrNoRows) {
+		http.Error(w, "not found", http.StatusNotFound)
+		return
+	} else if err != nil {
+		fail(w, err)
+		return
+	}
+	writeJSON(w, map[string]any{"ok": true, "starred": body.Starred})
+}
+
+// handleAddArticle adds an article by URL from the UI. The same work is reachable
+// by asking the chat agent, which calls the add_article tool.
+func (s *Server) handleAddArticle(w http.ResponseWriter, r *http.Request) {
+	var body struct {
+		URL string `json:"url"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil || strings.TrimSpace(body.URL) == "" {
+		http.Error(w, "url required", http.StatusBadRequest)
+		return
+	}
+	ctx, cancel := context.WithTimeout(r.Context(), 3*time.Minute)
+	defer cancel()
+	writeJSON(w, map[string]any{"result": s.chat.AddArticle(ctx, body.URL)})
 }
 
 func (s *Server) handleSetState(w http.ResponseWriter, r *http.Request) {
@@ -160,6 +213,9 @@ func (s *Server) handleTheme(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		fail(w, err)
 		return
+	}
+	if cv, err := s.st.ConversationForTopic("theme:" + t.Key); err == nil && cv != nil {
+		t.Conversation = cv
 	}
 	writeJSON(w, t)
 }

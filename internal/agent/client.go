@@ -8,12 +8,14 @@
 package agent
 
 import (
+	"bufio"
 	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
 	"io"
 	"net/http"
+	"strings"
 	"time"
 )
 
@@ -93,6 +95,19 @@ func (c *Client) CreateAgent(ctx context.Context, name, model, system string, to
 		"name": name, "model": model, "system": system, "tools": tools,
 	}, &out)
 	return out.ID, err
+}
+
+// UpdateAgent pushes a new version of an existing agent. Agents are immutable
+// per version, so changing the tool set means updating in place (not creating a
+// second agent) — sessions started later pick up the new version.
+//
+// `version` is omitted deliberately: supplying it makes the update conditional
+// and returns 409 if anything else bumped the agent first, which for a
+// single-owner config is a spurious failure.
+func (c *Client) UpdateAgent(ctx context.Context, agentID, model, system string, tools []any) error {
+	return c.do(ctx, http.MethodPost, "/v1/agents/"+agentID, map[string]any{
+		"model": model, "system": system, "tools": tools,
+	}, nil)
 }
 
 // CreateEnvironment creates a cloud environment with unrestricted egress
@@ -205,6 +220,123 @@ func (c *Client) ListEvents(ctx context.Context, sessionID string) ([]Event, err
 	}
 	err := c.do(ctx, http.MethodGet, "/v1/sessions/"+sessionID+"/events?limit=1000", nil, &out)
 	return out.Data, err
+}
+
+// Frame is one item off the SSE stream: either a persisted event (Type is an
+// event type like "agent.message") or a live text preview of one that is still
+// being generated ("event_start" / "event_delta").
+//
+// A preview is best-effort and may be a truncated prefix; the buffered event
+// that follows is authoritative. Frames carry the same ID either way, so a
+// consumer keyed on ID can render the preview and then replace it.
+type Frame struct {
+	Event
+	EventID string `json:"event_id"` // event_delta: which event this previews
+	Preview *Event `json:"event"`    // event_start: the event about to stream
+	Delta   *struct {
+		Type    string `json:"type"`
+		Index   int    `json:"index"`
+		Content struct {
+			Type string `json:"type"`
+			Text string `json:"text"`
+		} `json:"content"`
+	} `json:"delta"`
+}
+
+// DeltaText returns the incremental text on an event_delta frame, if any.
+func (f *Frame) DeltaText() (string, string, bool) {
+	if f.Type != "event_delta" || f.Delta == nil || f.Delta.Content.Type != "text" {
+		return "", "", false
+	}
+	return f.EventID, f.Delta.Content.Text, true
+}
+
+// StreamEvents opens the session's SSE stream, replacing repeated ListEvents
+// polling. Frames are delivered on the returned channel, which closes when the
+// stream ends; call the returned cancel to stop early. Any error is reported via
+// errFn before the channel closes.
+//
+// The stream only delivers events that occur after it opens and has no replay,
+// so callers must open it BEFORE sending the message that starts a turn, and
+// reconcile against ListEvents after a reconnect.
+func (c *Client) StreamEvents(ctx context.Context, sessionID string) (<-chan Frame, func(), error) {
+	// event_deltas opts into live text previews of assistant messages, which is
+	// what makes output appear token-by-token rather than a message at a time.
+	url := apiBase + "/v1/sessions/" + sessionID + "/events/stream?event_deltas%5B%5D=agent.message"
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
+	if err != nil {
+		return nil, nil, err
+	}
+	req.Header.Set("x-api-key", c.apiKey)
+	req.Header.Set("anthropic-version", "2023-06-01")
+	req.Header.Set("anthropic-beta", maBeta)
+	req.Header.Set("accept", "text/event-stream")
+
+	// The stream is long-lived (heartbeats keep it open), so it must not inherit
+	// the client's per-request timeout.
+	streamClient := &http.Client{Timeout: 0}
+	resp, err := streamClient.Do(req)
+	if err != nil {
+		return nil, nil, err
+	}
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		raw, _ := io.ReadAll(resp.Body)
+		resp.Body.Close()
+		return nil, nil, &APIError{Status: resp.StatusCode, Body: string(raw)}
+	}
+
+	out := make(chan Frame, 64)
+	done := make(chan struct{})
+	stop := func() {
+		select {
+		case <-done:
+		default:
+			close(done)
+		}
+		resp.Body.Close()
+	}
+
+	go func() {
+		defer close(out)
+		defer resp.Body.Close()
+		sc := bufio.NewScanner(resp.Body)
+		sc.Buffer(make([]byte, 0, 64*1024), 4*1024*1024) // tool results can be large
+		var data strings.Builder
+		flush := func() {
+			defer data.Reset()
+			if data.Len() == 0 {
+				return
+			}
+			var f Frame
+			if err := json.Unmarshal([]byte(data.String()), &f); err != nil {
+				return // heartbeat or a shape we don't model; ignore
+			}
+			select {
+			case out <- f:
+			case <-done:
+			case <-ctx.Done():
+			}
+		}
+		for sc.Scan() {
+			select {
+			case <-done:
+				return
+			case <-ctx.Done():
+				return
+			default:
+			}
+			line := sc.Text()
+			switch {
+			case line == "": // frame boundary
+				flush()
+			case strings.HasPrefix(line, "data:"):
+				data.WriteString(strings.TrimSpace(strings.TrimPrefix(line, "data:")))
+			}
+			// "event:" lines are redundant here — the type is in the JSON payload.
+		}
+		flush()
+	}()
+	return out, stop, nil
 }
 
 // Archive best-effort cleans up a finished session.

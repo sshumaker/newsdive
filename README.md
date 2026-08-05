@@ -23,7 +23,15 @@ services beyond the Anthropic API.
   small nudges for source popularity and your own 👍/👎.
 - **Themes** — Claude clusters recent items into cross-cutting themes, each with
   a synthesis of **connections, disagreements, and where the work is heading** —
-  the "aggregate ideas across papers" layer, not just per-item summaries.
+  the "aggregate ideas across papers" layer, not just per-item summaries. Themes
+  are re-clustered from scratch each cycle, so **★ pin** the ones you want to keep
+  tracking: a pinned theme keeps its identity and absorbs new items instead of
+  being rebuilt.
+- **Add by URL** — paste any paper/post URL in ⚙, or just ask the chat agent to
+  add one. It's fetched, enriched, and filed under the closest theme.
+- **Conversation digests** — once a chat thread has been idle for 15 minutes, it
+  is summarized onto the article or theme it was about, so you can see what you
+  concluded weeks later.
 - **Read** — scan a ranked feed, tap into a full breakdown, **save / dismiss /
   mark read / thumbs up-down**, and browse by theme. Links back to every source.
 - **Search** — full-text (SQLite FTS5) over titles, summaries, ideas, and tags.
@@ -63,6 +71,7 @@ news enrich [N]       summarize/score up to N unenriched items (default 200)
 news themes           re-cluster recent items into themes
 news all              ingest + enrich + themes (one full cycle)
 news chat "message" [itemID]   talk to the Managed Agents chat agent from the CLI
+news digest           summarize chat threads that have gone idle
 news ask "question"   one-shot research answer (web + corpus) from the CLI
 news stats            print collection stats
 ```
@@ -77,6 +86,7 @@ news stats            print collection stats
 | `NEWS_REFRESH_MINUTES` | `0` | If >0, the server ingests+enriches+re-themes on this interval. |
 | `NEWS_SOURCE_LIMIT` | `40` | Max items each source query pulls per run. |
 | `NEWS_ENRICH_WORKERS` | `32` | Concurrent enrichment requests. Rate-limited requests are retried with backoff, so this can exceed sustained throughput. |
+| `NEWS_DIGEST_MINUTES` | `15` | How often to sweep for chat threads that have gone idle and summarize them onto the article. `0` disables. |
 | `NEWS_ENRICH_MODEL` | `claude-sonnet-5` | Per-item enrichment (high volume → Sonnet). |
 | `NEWS_THEME_MODEL` | `claude-sonnet-5` | Theme clustering. |
 | `NEWS_ASK_MODEL` | `claude-opus-5` | The interactive research agent (depth + tools). |

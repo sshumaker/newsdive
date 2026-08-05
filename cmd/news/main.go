@@ -89,6 +89,15 @@ func main() {
 			log.Fatalf("all: %v", err)
 		}
 
+	case "digest":
+		needsKey()
+		chat := agent.NewChat(cfg.AnthropicAPIKey, st, cfg.AskModel)
+		n, err := agent.NewDigester(chat, cl, cfg.EnrichModel).SweepOnce(ctx)
+		if err != nil {
+			log.Fatalf("digest: %v", err)
+		}
+		fmt.Printf("summarized %d conversation(s)\n", n)
+
 	case "ask":
 		needsKey()
 		if len(os.Args) < 3 {
@@ -178,9 +187,15 @@ func serve(ctx context.Context, st *store.Store, cl *llm.Client, cfg *config.Con
 	}
 	go pipeline.Scheduler(ctx, st, cl, cfg)
 
+	api := server.New(st, cl, cfg)
+	if cfg.AnthropicAPIKey != "" {
+		// Roll idle chat threads up into per-article digests.
+		go api.Digester().Scheduler(ctx, cfg.DigestEvery)
+	}
+
 	srv := &http.Server{
 		Addr:    ":" + cfg.Port,
-		Handler: server.New(st, cl, cfg).Handler(),
+		Handler: api.Handler(),
 	}
 	go func() {
 		<-ctx.Done()

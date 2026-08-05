@@ -69,7 +69,10 @@ func EnrichPending(ctx context.Context, st *store.Store, cl *llm.Client, model, 
 	return done, nil
 }
 
-// RunThemes re-clusters the most recent enriched items into themes.
+// RunThemes re-clusters the most recent enriched items into themes. Themes the
+// reader has starred are passed to the clusterer so it reproduces them, and
+// SyncThemes preserves their identity — so a pinned theme keeps tracking its
+// topic across runs instead of being deleted and rebuilt.
 func RunThemes(ctx context.Context, st *store.Store, cl *llm.Client, model string, limit int) (int, error) {
 	items, err := st.RecentEnriched(limit)
 	if err != nil {
@@ -78,14 +81,39 @@ func RunThemes(ctx context.Context, st *store.Store, cl *llm.Client, model strin
 	if len(items) == 0 {
 		return 0, nil
 	}
-	themes, err := cl.SynthesizeThemes(ctx, model, items)
+	pinned, err := st.StarredThemes()
 	if err != nil {
 		return 0, err
 	}
-	if err := st.ReplaceThemes(themes); err != nil {
+	themes, err := cl.SynthesizeThemes(ctx, model, items, pinned)
+	if err != nil {
 		return 0, err
 	}
+	if err := st.SyncThemes(themes); err != nil {
+		return 0, err
+	}
+	if n := missingPinned(pinned, themes); n > 0 {
+		// Their rows and stars survive, but they hold no items this cycle.
+		log.Printf("themes: %d starred theme(s) not reproduced by the clusterer", n)
+	}
 	return len(themes), nil
+}
+
+// missingPinned counts starred themes the clusterer failed to return, matched on
+// the same normalized key SyncThemes upserts by (so minor rewording still counts
+// as a match).
+func missingPinned(pinned []*store.Theme, got []store.ThemeInput) int {
+	keys := map[string]bool{}
+	for _, t := range got {
+		keys[store.ThemeKey(t.Title)] = true
+	}
+	n := 0
+	for _, p := range pinned {
+		if !keys[store.ThemeKey(p.Title)] {
+			n++
+		}
+	}
+	return n
 }
 
 // RunAll does one full cycle: ingest, enrich, re-theme.

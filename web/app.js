@@ -6,7 +6,7 @@ const API = window.API_BASE || "";
 
 const view = document.getElementById("view");
 let currentTab = "feed";
-let feedState = { source: "", q: "" };
+let feedState = { source: "", q: "", unread: false };
 let searchTimer = null;
 // What the chat agent should treat as "the current page".
 let currentContext = { kind: "feed", id: "", title: "" };
@@ -98,7 +98,8 @@ async function renderFeed(saved) {
   const controls = saved ? "" : `<div class="controls">
     <div class="search"><input id="q" type="search" placeholder="Search your collection…" value="${esc(feedState.q)}" /></div>
     <div class="chips">${chips.map((c) =>
-      `<button class="chip ${feedState.source === c ? "active" : ""}" data-src="${c}">${chipLabels[c]}</button>`).join("")}</div>
+      `<button class="chip ${feedState.source === c ? "active" : ""}" data-src="${c}">${chipLabels[c]}</button>`).join("")}
+      <button class="chip unread-chip ${feedState.unread ? "active" : ""}" id="unreadChip">Unread</button></div>
   </div>`;
   view.innerHTML = controls + `<div id="list"><div class="loading">Loading…</div></div>`;
 
@@ -108,8 +109,11 @@ async function renderFeed(saved) {
       clearTimeout(searchTimer);
       searchTimer = setTimeout(() => { feedState.q = input.value.trim(); loadList(false); }, 320);
     });
-    view.querySelectorAll(".chip").forEach((c) =>
+    view.querySelectorAll(".chip[data-src]").forEach((c) =>
       c.addEventListener("click", () => { feedState.source = c.dataset.src; renderFeed(false); }));
+    document.getElementById("unreadChip").addEventListener("click", () => {
+      feedState.unread = !feedState.unread; renderFeed(false);
+    });
   }
   loadList(saved);
 }
@@ -122,6 +126,7 @@ async function loadList(saved) {
     else {
       if (feedState.source) params.set("source", feedState.source);
       if (feedState.q) params.set("q", feedState.q);
+      if (feedState.unread) params.set("state", "unread");
     }
     params.set("limit", "60");
     const { items } = await api("/api/feed?" + params.toString());
@@ -138,6 +143,20 @@ async function loadList(saved) {
 }
 
 // ---------- item detail ----------
+
+// convoDigest renders the rolled-up summary of the reader's chat about an item.
+// Written by the background sweep once the thread has been idle a while, so it
+// only appears after the conversation has settled.
+function convoDigest(cv) {
+  if (!cv || !cv.summary) return "";
+  const when = relTime(cv.last_activity);
+  return `<div class="section convo">
+    <h4>Your conversation${when ? ` · ${when}` : ""}</h4>
+    <p>${mdLite(cv.summary)}</p>
+    <div class="convo-meta">${cv.turns} message${cv.turns === 1 ? "" : "s"}</div>
+  </div>`;
+}
+
 function sectionList(title, arr, dim) {
   if (!arr || !arr.length) return "";
   return `<div class="section ${dim ? "dim" : ""}"><h4>${title}</h4><ul>${arr.map((x) => `<li>${esc(x)}</li>`).join("")}</ul></div>`;
@@ -151,8 +170,12 @@ async function openItem(id) {
 
   currentContext = { kind: "item", id: it.id, title: it.title };
 
-  // Mark read on open (best-effort).
-  if (it.state === "unread") { post(`/api/item/${id}/state`, { state: "read" }).catch(() => {}); }
+  // Mark read on open (best-effort), then refresh the header counts — the DB
+  // was always updated here, but nothing re-fetched stats, so the unread number
+  // sat stale until a page reload and looked like it wasn't counting down.
+  if (it.state === "unread") {
+    post(`/api/item/${id}/state`, { state: "read" }).then(loadStats).catch(() => {});
+  }
 
   const scores = it.enriched
     ? `<span class="score ${scoreClass(it.score)}">${Math.round(it.score)}</span>
@@ -172,6 +195,7 @@ async function openItem(id) {
       </div>
       <a class="linkout" href="${esc(it.url)}" target="_blank" rel="noopener">Open source ↗</a>
       ${it.summary ? `<div class="section"><h4>Summary</h4><p>${esc(it.summary)}</p></div>` : ""}
+      ${convoDigest(it.conversation)}
       ${(it.tags && it.tags.length) ? `<div class="tags">${it.tags.map((t) => `<span class="tag">${esc(t)}</span>`).join("")}</div>` : ""}
       ${sectionList("Key ideas", it.key_ideas)}
       ${sectionList("Claims", it.claims)}
@@ -194,13 +218,16 @@ async function openItem(id) {
     const act = btn.dataset.act;
     try {
       if (act === "save") {
-        const now = btn.classList.contains("on") ? "unread" : "saved";
+        // Un-saving returns to "read", not "unread": the item is open, so it has
+        // been seen. Sending it back to "unread" pushed the unread count up.
+        const now = btn.classList.contains("on") ? "read" : "saved";
         await post(`/api/item/${id}/state`, { state: now });
         btn.classList.toggle("on"); btn.classList.toggle("save");
         toast(now === "saved" ? "Saved" : "Removed");
+        loadStats();
       } else if (act === "dismiss") {
         await post(`/api/item/${id}/state`, { state: "dismissed" });
-        toast("Dismissed"); switchTab(currentTab, true);
+        toast("Dismissed"); switchTab(currentTab, true); loadStats();
       } else if (act === "up" || act === "down") {
         const val = act === "up" ? 1 : -1;
         const on = btn.classList.contains("on");
@@ -224,14 +251,32 @@ async function renderThemes() {
     }
     view.innerHTML = themes.map((t) =>
       `<div class="theme-card" data-id="${t.id}">
+        <button class="star ${t.starred ? "on" : ""}" data-star="${t.id}"
+          title="${t.starred ? "Pinned — kept across re-clustering" : "Pin this theme"}"
+          aria-label="${t.starred ? "Unpin theme" : "Pin theme"}">${t.starred ? "★" : "☆"}</button>
         <h3>${esc(t.title)}</h3>
         <p>${esc(t.description)}</p>
-        <div class="count">${t.item_count} item${t.item_count === 1 ? "" : "s"}</div>
+        <div class="count">${t.item_count} item${t.item_count === 1 ? "" : "s"}${t.starred ? " · pinned" : ""}</div>
       </div>`).join("");
     view.querySelectorAll(".theme-card").forEach((c) =>
       c.addEventListener("click", () => openTheme(parseInt(c.dataset.id, 10))));
+    view.querySelectorAll("[data-star]").forEach((b) =>
+      b.addEventListener("click", (e) => { e.stopPropagation(); toggleStar(b); }));
   } catch (e) { view.innerHTML = `<div class="empty">Error: ${esc(e.message)}</div>`; }
 }
+// toggleStar pins/unpins a theme. Pinned themes survive re-clustering instead of
+// being deleted and rebuilt, so they keep tracking their topic over time.
+async function toggleStar(btn) {
+  const id = btn.dataset.star;
+  const starred = !btn.classList.contains("on");
+  try {
+    await post(`/api/theme/${id}/star`, { starred });
+    btn.classList.toggle("on", starred);
+    btn.textContent = starred ? "★" : "☆";
+    toast(starred ? "Pinned — kept across re-clustering" : "Unpinned");
+  } catch (e) { toast("Error: " + e.message); }
+}
+
 async function openTheme(id) {
   view.innerHTML = `<div class="loading">Loading…</div>`;
   window.scrollTo(0, 0);
@@ -247,6 +292,7 @@ async function openTheme(id) {
       <div class="detail">
         <h1>${esc(t.title)}</h1>
         <div class="section"><p>${esc(t.description)}</p></div>
+        ${convoDigest(t.conversation)}
         ${synth}
         <div class="section"><h4>${t.item_count} items</h4></div>
         <div id="list">${(t.items || []).map(itemCard).join("")}</div>
@@ -284,8 +330,12 @@ function renderChat() {
     if (m.role === "user") return `<div class="msg user">${esc(m.text)}</div>`;
     if (m.role === "thinking") {
       const label = m.tool ? `using <b>${esc(m.tool)}</b>…` : "thinking…";
-      const partial = m.text ? `<div class="msg bot partial">${mdLite(m.text)}</div>` : "";
-      return `${partial}<div class="msg bot thinking"><span class="pulse"></span> ${label}</div>`;
+      // Blocks are keyed by server event id: live deltas append to a block, and
+      // the buffered message for that id replaces it (deltas are best-effort and
+      // can be a truncated prefix, so the buffered text is authoritative).
+      const blocks = m.order.map((id) =>
+        `<div class="msg bot${m.final[id] ? "" : " partial"}">${mdLite(m.blocks[id])}</div>`).join("");
+      return `${blocks}<div class="msg bot thinking"><span class="pulse"></span> ${label}</div>`;
     }
     return `<div class="msg bot">${mdLite(m.text)}</div>`;
   }).join("");
@@ -328,19 +378,26 @@ async function sendChat() {
   if (!q) return;
   input.value = ""; input.style.height = "auto";
   chat.messages.push({ role: "user", text: q });
-  const pending = { role: "thinking", text: "", tool: "" };
+  // blocks/final/order track per-event-id text so a live delta preview can be
+  // replaced by the authoritative buffered message without duplicating it.
+  const pending = { role: "thinking", tool: "", blocks: {}, final: {}, order: [] };
+  const touch = (id) => { if (!(id in pending.blocks)) { pending.blocks[id] = ""; pending.order.push(id); } };
+  const joined = () => pending.order.map((id) => pending.blocks[id]).join("\n\n").trim();
   chat.messages.push(pending);
   renderChat();
   document.getElementById("chatSend").disabled = true;
   try {
     await streamSSE("/api/chat", { session_id: chat.id, message: q, context: chat.ctx }, (name, d) => {
-      if (name === "progress" && d.type === "text") { pending.text += d.text; pending.tool = ""; }
-      else if (name === "progress" && d.type === "tool") pending.tool = d.tool;
+      if (name === "progress" && d.type === "text") {
+        touch(d.id); pending.blocks[d.id] += d.text; pending.tool = "";
+      } else if (name === "progress" && d.type === "message") {
+        touch(d.id); pending.blocks[d.id] = d.text; pending.final[d.id] = true; pending.tool = "";
+      } else if (name === "progress" && d.type === "tool") pending.tool = d.tool;
       else if (name === "progress" && d.type === "session") chat.id = d.id;
       else if (name === "done") {
         chat.id = d.session_id || chat.id;
         const i = chat.messages.indexOf(pending);
-        if (i >= 0) chat.messages.splice(i, 1, { role: "bot", text: d.text || "(no reply)" });
+        if (i >= 0) chat.messages.splice(i, 1, { role: "bot", text: d.text || joined() || "(no reply)" });
       } else if (name === "error") {
         chat.messages.push({ role: "bot", text: "Error: " + d.error });
       } else return;
@@ -348,7 +405,7 @@ async function sendChat() {
     });
     // Stream ended without a terminal frame — keep whatever text arrived.
     const i = chat.messages.indexOf(pending);
-    if (i >= 0) chat.messages.splice(i, 1, { role: "bot", text: pending.text || "(no reply)" });
+    if (i >= 0) chat.messages.splice(i, 1, { role: "bot", text: joined() || "(no reply)" });
   } catch (e) {
     const i = chat.messages.indexOf(pending);
     if (i >= 0) chat.messages.splice(i, 1);
@@ -378,6 +435,11 @@ function renderSettings() {
   const feeds = sources.extra_feeds.map((f, i) =>
     `<span class="editchip">${esc(f.name || f.url)}<button data-rm-feed="${i}">✕</button></span>`).join("");
   document.getElementById("settingsBody").innerHTML = `
+    <h4>Add an article</h4>
+    <p class="hint">Paste any paper or post URL. It's fetched, summarized, scored, and filed under the closest theme. You can also just ask the chat agent to add a URL.</p>
+    <div class="add-row"><input id="articleInput" placeholder="https://arxiv.org/abs/…" /><button id="articleAdd">Add</button></div>
+    <div class="hint" id="articleResult"></div>
+
     <h4>Bluesky accounts</h4>
     <p class="hint">Follow people's posts. Enter a handle like <code>simonwillison.net</code> (or paste a profile URL).</p>
     <div class="chip-row">${bsky || '<span class="hint">None yet.</span>'}</div>
@@ -406,6 +468,26 @@ function renderSettings() {
     const v = document.getElementById("feedInput").value.trim();
     if (v) { sources.extra_feeds.push({ name: "", url: v }); renderSettings(); }
   };
+  // Adding an article is immediate (fetch + enrich), unlike the source lists
+  // which only take effect on save, so it has its own inline result line.
+  const addArticle = async () => {
+    const input = document.getElementById("articleInput");
+    const out = document.getElementById("articleResult");
+    const btn = document.getElementById("articleAdd");
+    const url = input.value.trim();
+    if (!url) return;
+    btn.disabled = true;
+    out.textContent = "Fetching and summarizing…";
+    try {
+      const r = await post("/api/articles", { url });
+      out.textContent = r.result || "Done.";
+      input.value = "";
+      loadStats();
+    } catch (e) { out.textContent = "Error: " + e.message; }
+    finally { btn.disabled = false; }
+  };
+  document.getElementById("articleAdd").addEventListener("click", addArticle);
+  document.getElementById("articleInput").addEventListener("keydown", (e) => { if (e.key === "Enter") addArticle(); });
   document.getElementById("bskyAdd").addEventListener("click", addBsky);
   document.getElementById("feedAdd").addEventListener("click", addFeed);
   document.getElementById("bskyInput").addEventListener("keydown", (e) => { if (e.key === "Enter") addBsky(); });

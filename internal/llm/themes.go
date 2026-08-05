@@ -56,11 +56,15 @@ For each theme:
 - trajectory: how this line of work seems to be evolving — what's emerging, what's maturing, what's next.
 - item_ids: the IDs of the items in this theme (use the exact IDs given).
 
-Assign each item to its single best-fitting theme (an item may appear in more than one theme only if it genuinely bridges them). Prefer substantive themes over catch-all buckets.`
+Assign each item to its single best-fitting theme (an item may appear in more than one theme only if it genuinely bridges them). Prefer substantive themes over catch-all buckets.
+
+If the reader has PINNED themes, they are listed separately. Reproduce each pinned theme in your output using its title verbatim — the reader is tracking it over time and it must not disappear or be renamed. Assign to it whichever current items genuinely belong, and rewrite its description/connections/disagreements/trajectory to reflect that current membership. If no current item fits a pinned theme, still return it with an empty item_ids list. Pinned themes count toward the 4-10 total; add new themes for whatever they don't cover.`
 
 // SynthesizeThemes clusters recent enriched items into cross-cutting themes with
 // synthesis of connections, disagreements, and trajectory.
-func (c *Client) SynthesizeThemes(ctx context.Context, model string, items []*store.Item) ([]store.ThemeInput, error) {
+// pinned themes must be reproduced verbatim in the output so they survive the
+// run; see themesSystem.
+func (c *Client) SynthesizeThemes(ctx context.Context, model string, items []*store.Item, pinned []*store.Theme) ([]store.ThemeInput, error) {
 	if len(items) == 0 {
 		return nil, nil
 	}
@@ -72,6 +76,12 @@ func (c *Client) SynthesizeThemes(ctx context.Context, model string, items []*st
 		}
 		fmt.Fprintf(&sb, "- id=%s | %s | %s | tags: %s\n",
 			it.ID, truncate(it.Title, 120), truncate(line, 220), strings.Join(it.Tags, ", "))
+	}
+	if len(pinned) > 0 {
+		sb.WriteString("\nPINNED themes (reproduce each of these, title verbatim):\n")
+		for _, t := range pinned {
+			fmt.Fprintf(&sb, "- %s — %s\n", t.Title, truncate(t.Description, 240))
+		}
 	}
 
 	resp, err := c.Do(ctx, Request{
