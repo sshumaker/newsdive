@@ -585,6 +585,9 @@ func formatItem(it *store.Item) string {
 	writeList(&sb, "CLAIMS", it.Claims)
 	writeList(&sb, "EVIDENCE", it.Evidence)
 	writeList(&sb, "LIMITATIONS", it.Limitations)
+	if it.SkepticsTake != "" {
+		fmt.Fprintf(&sb, "SKEPTIC'S TAKE: %s\n\n", it.SkepticsTake)
+	}
 	writeList(&sb, "OPEN QUESTIONS", it.OpenQuestions)
 	if len(it.Tags) > 0 {
 		fmt.Fprintf(&sb, "TAGS: %s\n", strings.Join(it.Tags, ", "))

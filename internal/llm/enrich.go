@@ -17,6 +17,7 @@ type enrichResult struct {
 	Claims        []string `json:"claims"`
 	Evidence      []string `json:"evidence"`
 	Limitations   []string `json:"limitations"`
+	SkepticsTake  string   `json:"skeptics_take"`
 	OpenQuestions []string `json:"open_questions"`
 	Tags          []string `json:"tags"`
 	Relevance     int      `json:"relevance"`
@@ -33,6 +34,7 @@ var enrichSchema = map[string]any{
 		"claims":         strArray,
 		"evidence":       strArray,
 		"limitations":    strArray,
+		"skeptics_take":  map[string]any{"type": "string"},
 		"open_questions": strArray,
 		"tags":           strArray,
 		"relevance":      map[string]any{"type": "integer"},
@@ -40,7 +42,7 @@ var enrichSchema = map[string]any{
 		"importance":     map[string]any{"type": "integer"},
 	},
 	"required": []string{"one_liner", "summary", "key_ideas", "claims", "evidence",
-		"limitations", "open_questions", "tags", "relevance", "novelty", "importance"},
+		"limitations", "skeptics_take", "open_questions", "tags", "relevance", "novelty", "importance"},
 	"additionalProperties": false,
 }
 
@@ -60,6 +62,7 @@ Fields:
 - claims: specific claims the work makes.
 - evidence: what backs the claims (datasets, benchmarks, experiments, ablations) — empty if none stated.
 - limitations: honest limitations, caveats, or threats to validity.
+- skeptics_take: 2-4 sentences arguing the case against the work, as a sharp, well-informed critic would. Go past the authors' own stated limitations: where might the result not replicate or not generalize, what is the most favorable-to-the-authors reading of the setup, is the baseline weak or the benchmark saturated/contaminated, is the effect explained by something more mundane (scale, data, tuning), and does the framing overclaim relative to what was measured? Argue from what the item actually says — no invented flaws. If the work is genuinely solid, say what would still need to be true for it to matter, rather than manufacturing a critique.
 - open_questions: what remains unresolved or worth following up.
 - tags: 3-6 short lowercase topic tags (e.g. "agents", "tool-use", "rl", "evaluation").
 - relevance: 0-100, how relevant to THIS reader's interests above.
@@ -106,6 +109,7 @@ func (c *Client) Enrich(ctx context.Context, model, interests string, it *store.
 	it.Claims = r.Claims
 	it.Evidence = r.Evidence
 	it.Limitations = r.Limitations
+	it.SkepticsTake = r.SkepticsTake
 	it.OpenQuestions = r.OpenQuestions
 	it.Tags = lowerAll(r.Tags)
 	it.Relevance = clamp(r.Relevance)

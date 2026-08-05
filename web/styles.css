@@ -168,6 +168,15 @@ a:active { opacity: .7; }
 /* unread filter chip sits apart from the source chips */
 .chip.unread-chip { margin-left: auto; }
 
+/* the three LLM judgments, spelled out on the detail page */
+.metrics { display: inline-flex; flex-wrap: wrap; gap: 10px; }
+.metric { color: var(--text-dim); font-size: 12.5px; white-space: nowrap; }
+.metric b { color: var(--text); font-weight: 650; }
+
+/* the case against — visually distinct from the neutral sections */
+.section.skeptic { border-left: 2px solid #d08770; padding-left: 12px; }
+.section.skeptic h4 { color: #d08770; }
+
 /* rolled-up chat digest on an item */
 .section.convo { border-left: 2px solid var(--accent); padding-left: 12px; }
 .section.convo .convo-meta { color: var(--text-dim); font-size: 12.5px; margin-top: 6px; }

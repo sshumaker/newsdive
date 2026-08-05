@@ -16,8 +16,11 @@ type Config struct {
 	DBPath          string
 	Port            string
 
-	// Models. Batch enrichment/themes default to Sonnet (high volume, cost);
-	// the interactive ask agent defaults to Opus (depth + tool use).
+	// Models. Enrichment is the analysis layer the whole reader is built on —
+	// the per-item judgments and the skeptic's take are only worth reading if
+	// they're sharp — so it runs on Opus despite the volume. Theme clustering
+	// stays on Sonnet (one call, mostly grouping). Set NEWS_ENRICH_MODEL to a
+	// Sonnet id to trade analysis quality for cost.
 	EnrichModel string
 	ThemeModel  string
 	AskModel    string
@@ -63,7 +66,7 @@ func Load() (*Config, error) {
 		AnthropicAPIKey: os.Getenv("ANTHROPIC_API_KEY"),
 		DBPath:          getenv("NEWS_DB", "data/news.db"),
 		Port:            getenv("PORT", "8787"),
-		EnrichModel:     getenv("NEWS_ENRICH_MODEL", "claude-sonnet-5"),
+		EnrichModel:     getenv("NEWS_ENRICH_MODEL", "claude-opus-5"),
 		ThemeModel:      getenv("NEWS_THEME_MODEL", "claude-sonnet-5"),
 		AskModel:        getenv("NEWS_ASK_MODEL", "claude-opus-5"),
 		SourceLimit:     getenvInt("NEWS_SOURCE_LIMIT", 40),

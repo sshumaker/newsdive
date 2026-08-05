@@ -6,6 +6,10 @@ import (
 	"time"
 )
 
+// unknownAgeDays is the age assumed for an item whose source gave no
+// publication date — three half-lives, so it keeps ~12% of the recency bonus.
+const unknownAgeDays float64 = 30
+
 // Rank computes a recency-adjusted display score for each item in place and
 // sorts the slice best-first.
 //
@@ -23,9 +27,15 @@ func Rank(items []*Item) {
 			base = 35 // unranked-but-present baseline; recency does the rest
 		}
 
-		ageDays := now.Sub(it.PublishedAt).Hours() / 24
-		if it.PublishedAt.IsZero() || ageDays < 0 {
-			ageDays = 0
+		// An unknown date must not read as "published this instant" — that was
+		// giving undated items the full recency bonus and floating them above
+		// genuinely fresh work. Treat unknown as moderately old instead: not
+		// buried, but never rewarded for freshness it hasn't demonstrated.
+		ageDays := unknownAgeDays
+		if !it.PublishedAt.IsZero() {
+			if ageDays = now.Sub(it.PublishedAt).Hours() / 24; ageDays < 0 {
+				ageDays = 0 // clock skew / sloppy source metadata
+			}
 		}
 		recency := 100 * math.Pow(0.5, ageDays/10.0)
 

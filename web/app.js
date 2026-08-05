@@ -34,7 +34,11 @@ function relTime(iso) {
   if (s < 3600) return Math.max(1, Math.floor(s / 60)) + "m";
   if (s < 86400) return Math.floor(s / 3600) + "h";
   if (s < 86400 * 30) return Math.floor(s / 86400) + "d";
-  return d.toLocaleDateString(undefined, { month: "short", day: "numeric" });
+  // Include the year outside the current one — "Jan 22" for a 2025 paper reads
+  // as this January.
+  const opts = { month: "short", day: "numeric" };
+  if (d.getFullYear() !== new Date().getFullYear()) opts.year = "numeric";
+  return d.toLocaleDateString(undefined, opts);
 }
 function sourceLabel(t) { return { arxiv: "arXiv", hackernews: "Hacker News", blog: "Blog", bluesky: "Bluesky" }[t] || t; }
 function truncStr(s, n) { s = String(s || ""); return s.length > n ? s.slice(0, n) + "…" : s; }
@@ -179,9 +183,18 @@ async function openItem(id) {
     post(`/api/item/${id}/state`, { state: "read" }).then(loadStats).catch(() => {});
   }
 
+  // Spelled out on the detail page — "rel 85 · nov 58 · imp 62" is unreadable
+  // if you don't already know what it means. The big number is the ranking
+  // score, which blends these three with recency, so it's labelled separately.
+  const metric = (label, v, why) =>
+    `<span class="metric" title="${why}"><b>${v}</b> ${label}</span>`;
   const scores = it.enriched
-    ? `<span class="score ${scoreClass(it.score)}">${Math.round(it.score)}</span>
-       <span>rel ${it.relevance} · nov ${it.novelty} · imp ${it.importance}</span>` : "";
+    ? `<span class="score ${scoreClass(it.score)}" title="Overall rank: the three scores below, weighted, then adjusted for how recent the item is.">${Math.round(it.score)}</span>
+       <span class="metrics">
+         ${metric("relevance", it.relevance, "How well this matches your stated research interests (0-100).")}
+         ${metric("novelty", it.novelty, "How new this is versus prior work (0-100).")}
+         ${metric("importance", it.importance, "Likely impact if the claims hold up (0-100).")}
+       </span>` : "";
   const theme = it.theme_id
     ? `<a href="#" id="themeLink">🕸 ${esc(it.theme_title || "theme")}</a>` : "";
 
@@ -203,6 +216,7 @@ async function openItem(id) {
       ${sectionList("Claims", it.claims)}
       ${sectionList("Evidence", it.evidence, true)}
       ${sectionList("Limitations", it.limitations, true)}
+      ${it.skeptics_take ? `<div class="section skeptic"><h4>Skeptic's take</h4><p>${esc(it.skeptics_take)}</p></div>` : ""}
       ${sectionList("Open questions", it.open_questions, true)}
       <div class="actions">
         <button class="act save ${it.state === "saved" ? "on save" : ""}" data-act="save">★ Save</button>

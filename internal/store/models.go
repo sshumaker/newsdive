@@ -26,6 +26,7 @@ type Item struct {
 	Claims        []string `json:"claims"`
 	Evidence      []string `json:"evidence"`
 	Limitations   []string `json:"limitations"`
+	SkepticsTake  string   `json:"skeptics_take"` // the case against, beyond the authors' own caveats
 	OpenQuestions []string `json:"open_questions"`
 	Tags          []string `json:"tags"`
 

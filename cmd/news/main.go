@@ -21,6 +21,7 @@ import (
 	"news/internal/llm"
 	"news/internal/pipeline"
 	"news/internal/server"
+	"news/internal/sources"
 	"news/internal/store"
 )
 
@@ -88,6 +89,36 @@ func main() {
 		if err := pipeline.RunAll(ctx, st, cl, cfg); err != nil {
 			log.Fatalf("all: %v", err)
 		}
+
+	case "redate":
+		// Repairs items whose publication date was stamped at fetch time by an
+		// older on-demand add, by refetching the page and reading its real date.
+		items, err := st.SuspectDated(200)
+		if err != nil {
+			log.Fatalf("redate: %v", err)
+		}
+		fixed := 0
+		for _, it := range items {
+			fresh, err := sources.FetchURL(it.URL)
+			if err != nil {
+				fmt.Printf("  skip  %s (%v)\n", truncTitle(it.Title), err)
+				continue
+			}
+			if fresh.PublishedAt.IsZero() {
+				fmt.Printf("  none  %s — source states no date\n", truncTitle(it.Title))
+				continue
+			}
+			if fresh.PublishedAt.Truncate(24 * time.Hour).Equal(it.PublishedAt.Truncate(24 * time.Hour)) {
+				continue // already correct
+			}
+			if err := st.SetPublishedAt(it.ID, fresh.PublishedAt); err != nil {
+				log.Fatalf("redate %s: %v", it.ID, err)
+			}
+			fmt.Printf("  fixed %s: %s -> %s\n", truncTitle(it.Title),
+				it.PublishedAt.Format("2006-01-02"), fresh.PublishedAt.Format("2006-01-02"))
+			fixed++
+		}
+		fmt.Printf("checked %d, corrected %d\n", len(items), fixed)
 
 	case "digest":
 		needsKey()
@@ -208,4 +239,11 @@ func serve(ctx context.Context, st *store.Store, cl *llm.Client, cfg *config.Con
 	if err := srv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
 		log.Fatalf("server: %v", err)
 	}
+}
+
+func truncTitle(s string) string {
+	if len(s) > 46 {
+		return s[:46] + "…"
+	}
+	return s
 }

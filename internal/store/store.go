@@ -61,6 +61,7 @@ CREATE TABLE IF NOT EXISTS items (
   claims         TEXT NOT NULL DEFAULT '[]',
   evidence       TEXT NOT NULL DEFAULT '[]',
   limitations    TEXT NOT NULL DEFAULT '[]',
+  skeptics_take  TEXT NOT NULL DEFAULT '',
   open_questions TEXT NOT NULL DEFAULT '[]',
   tags           TEXT NOT NULL DEFAULT '[]',
   relevance      INTEGER NOT NULL DEFAULT 0,
@@ -127,6 +128,9 @@ func (s *Store) migrateThemeKeys() error {
 	for _, stmt := range []string{
 		`ALTER TABLE themes ADD COLUMN key TEXT NOT NULL DEFAULT ''`,
 		`ALTER TABLE themes ADD COLUMN starred INTEGER NOT NULL DEFAULT 0`,
+		// Items enriched before this column existed keep '' and simply render no
+		// skeptic's take until they are re-enriched.
+		`ALTER TABLE items ADD COLUMN skeptics_take TEXT NOT NULL DEFAULT ''`,
 	} {
 		if _, err := s.db.Exec(stmt); err != nil && !strings.Contains(err.Error(), "duplicate column") {
 			return fmt.Errorf("migrate themes: %w", err)
@@ -229,7 +233,7 @@ func fromUnix(n int64) time.Time {
 	return time.Unix(n, 0).UTC()
 }
 
-const selectCols = `i.seq,i.id,i.source,i.source_type,i.title,i.url,i.authors,i.published_at,i.fetched_at,i.raw_text,i.points,i.enriched,i.one_liner,i.summary,i.key_ideas,i.claims,i.evidence,i.limitations,i.open_questions,i.tags,i.relevance,i.novelty,i.importance,i.score,i.state,i.feedback,i.theme_id,t.title`
+const selectCols = `i.seq,i.id,i.source,i.source_type,i.title,i.url,i.authors,i.published_at,i.fetched_at,i.raw_text,i.points,i.enriched,i.one_liner,i.summary,i.key_ideas,i.claims,i.evidence,i.limitations,i.skeptics_take,i.open_questions,i.tags,i.relevance,i.novelty,i.importance,i.score,i.state,i.feedback,i.theme_id,t.title`
 
 const selectBase = `SELECT ` + selectCols + ` FROM items i LEFT JOIN themes t ON t.id=i.theme_id`
 
@@ -246,7 +250,7 @@ func scanItem(rows *sql.Rows) (*Item, error) {
 	)
 	err := rows.Scan(&seq, &it.ID, &it.Source, &it.SourceType, &it.Title, &it.URL,
 		&authors, &pub, &fetched, &it.RawText, &it.Points, &enriched,
-		&it.OneLiner, &it.Summary, &ki, &cl, &ev, &lim, &oq, &tags,
+		&it.OneLiner, &it.Summary, &ki, &cl, &ev, &lim, &it.SkepticsTake, &oq, &tags,
 		&it.Relevance, &it.Novelty, &it.Importance, &it.Score, &it.State, &it.Feedback,
 		&themeID, &themeTitle)
 	if err != nil {
@@ -315,10 +319,10 @@ func (s *Store) PendingEnrichment(limit int) ([]*Item, error) {
 func (s *Store) SaveEnrichment(it *Item) error {
 	_, err := s.db.Exec(`UPDATE items SET
 		enriched=1, one_liner=?, summary=?, key_ideas=?, claims=?, evidence=?,
-		limitations=?, open_questions=?, tags=?, relevance=?, novelty=?, importance=?, score=?
+		limitations=?, skeptics_take=?, open_questions=?, tags=?, relevance=?, novelty=?, importance=?, score=?
 		WHERE id=?`,
 		it.OneLiner, it.Summary, jsonArr(it.KeyIdeas), jsonArr(it.Claims), jsonArr(it.Evidence),
-		jsonArr(it.Limitations), jsonArr(it.OpenQuestions), jsonArr(it.Tags),
+		jsonArr(it.Limitations), it.SkepticsTake, jsonArr(it.OpenQuestions), jsonArr(it.Tags),
 		it.Relevance, it.Novelty, it.Importance, it.Score, it.ID)
 	if err != nil {
 		return err
@@ -408,6 +412,10 @@ func (s *Store) Get(id string) (*Item, error) {
 	if len(items) == 0 {
 		return nil, sql.ErrNoRows
 	}
+	// Rank here too: the stored score column is the enrichment-time base, with
+	// no recency term. Without this the detail page shows a different (and for
+	// older items much higher) number than the same item's row in the feed.
+	Rank(items)
 	return items[0], nil
 }
 
@@ -487,6 +495,30 @@ type ThemeInput struct {
 	Disagreements string
 	Trajectory    string
 	ItemIDs       []string
+}
+
+// SuspectDated returns items whose publication date looks like it was stamped
+// at fetch time rather than read from the source — the signature of an
+// on-demand add that couldn't find a real date. Also catches missing and
+// future dates.
+func (s *Store) SuspectDated(limit int) ([]*Item, error) {
+	rows, err := s.db.Query(selectBase+`
+		WHERE i.published_at<=0
+		   OR i.published_at > strftime('%s','now')+3600
+		   OR abs(i.published_at - i.fetched_at) < 120
+		ORDER BY i.fetched_at DESC LIMIT ?`, limit)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	return collect(rows)
+}
+
+// SetPublishedAt corrects an item's publication date. Score is recomputed from
+// it on every read, so nothing else needs updating.
+func (s *Store) SetPublishedAt(id string, t time.Time) error {
+	_, err := s.db.Exec(`UPDATE items SET published_at=? WHERE id=?`, t.Unix(), id)
+	return err
 }
 
 // SetItemTheme files a single item under a theme without re-clustering.
