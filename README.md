@@ -67,6 +67,24 @@ news ask "question"   one-shot research answer (web + corpus) from the CLI
 news stats            print collection stats
 ```
 
+### Secrets with Doppler (optional, for multi-machine dev)
+
+Instead of a per-machine `.env`, you can keep `ANTHROPIC_API_KEY` in
+[Doppler](https://www.doppler.com) and inject it at runtime:
+
+```bash
+brew install dopplerhq/cli/doppler   # once
+doppler login                        # interactive browser auth
+./scripts/doppler-setup.sh           # creates the 'newsdive' project, seeds from .env
+
+doppler run -- ./bin/news serve      # run with secrets injected (no .env needed)
+```
+
+On a second machine the secret is already in Doppler — just:
+`doppler login && doppler setup -p newsdive -c dev`, then `doppler run -- ...`.
+The app reads `ANTHROPIC_API_KEY` from the environment either way, so `.env` and
+Doppler are interchangeable.
+
 ### Configuration (env / `.env`)
 
 | Variable | Default | Purpose |
