@@ -28,6 +28,10 @@ type Config struct {
 	// How many candidate items each source pulls per ingest run.
 	SourceLimit int
 
+	// How many enrichment requests run concurrently. The client retries 429s
+	// with backoff, so this can sit well above what the rate limit sustains.
+	EnrichWorkers int
+
 	// Interests describe what "relevant" means for this reader.
 	Interests string
 }
@@ -60,6 +64,7 @@ func Load() (*Config, error) {
 		ThemeModel:      getenv("NEWS_THEME_MODEL", "claude-sonnet-5"),
 		AskModel:        getenv("NEWS_ASK_MODEL", "claude-opus-5"),
 		SourceLimit:     getenvInt("NEWS_SOURCE_LIMIT", 40),
+		EnrichWorkers:   getenvInt("NEWS_ENRICH_WORKERS", 32),
 		Interests:       getenv("NEWS_INTERESTS", defaultInterests),
 	}
 

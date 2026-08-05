@@ -13,6 +13,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"strconv"
 	"strings"
 	"time"
 )
@@ -106,37 +107,108 @@ func (r *Response) Text() string {
 	return sb.String()
 }
 
-// Do sends one Messages request.
+// maxAttempts bounds retries of rate-limited / transient failures. Enrichment
+// runs many requests concurrently, so 429s are expected rather than exceptional.
+const maxAttempts = 5
+
+// Do sends one Messages request, retrying 429s and 5xx with backoff.
 func (c *Client) Do(ctx context.Context, req Request) (*Response, error) {
 	body, err := json.Marshal(req)
 	if err != nil {
 		return nil, err
 	}
+
+	var lastErr error
+	for attempt := 0; attempt < maxAttempts; attempt++ {
+		if attempt > 0 {
+			if err := sleep(ctx, backoff(attempt)); err != nil {
+				return nil, err
+			}
+		}
+		out, retryAfter, err := c.do(ctx, body, req.betas)
+		if err == nil {
+			return out, nil
+		}
+		lastErr = err
+		if retryAfter < 0 {
+			return nil, err // not retryable
+		}
+		if retryAfter > 0 {
+			if err := sleep(ctx, retryAfter); err != nil {
+				return nil, err
+			}
+		}
+	}
+	return nil, fmt.Errorf("after %d attempts: %w", maxAttempts, lastErr)
+}
+
+// do performs a single attempt. The returned duration is the server-requested
+// retry delay; zero means "retryable, use backoff" and -1 means "do not retry".
+func (c *Client) do(ctx context.Context, body []byte, betas []string) (*Response, time.Duration, error) {
 	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, apiURL, bytes.NewReader(body))
 	if err != nil {
-		return nil, err
+		return nil, -1, err
 	}
 	httpReq.Header.Set("x-api-key", c.apiKey)
 	httpReq.Header.Set("anthropic-version", apiVersion)
 	httpReq.Header.Set("content-type", "application/json")
-	if len(req.betas) > 0 {
-		httpReq.Header.Set("anthropic-beta", strings.Join(req.betas, ","))
+	if len(betas) > 0 {
+		httpReq.Header.Set("anthropic-beta", strings.Join(betas, ","))
 	}
 
 	resp, err := c.http.Do(httpReq)
 	if err != nil {
-		return nil, err
+		if ctx.Err() != nil {
+			return nil, -1, err
+		}
+		return nil, 0, err // transport hiccup: retry
 	}
 	defer resp.Body.Close()
 	raw, _ := io.ReadAll(resp.Body)
 	if resp.StatusCode != http.StatusOK {
-		return nil, fmt.Errorf("anthropic %d: %s", resp.StatusCode, truncate(string(raw), 600))
+		err := fmt.Errorf("anthropic %d: %s", resp.StatusCode, truncate(string(raw), 600))
+		switch {
+		case resp.StatusCode == http.StatusTooManyRequests:
+			return nil, retryAfter(resp), err
+		case resp.StatusCode >= 500:
+			return nil, 0, err
+		default:
+			return nil, -1, err
+		}
 	}
 	var out Response
 	if err := json.Unmarshal(raw, &out); err != nil {
-		return nil, fmt.Errorf("decode response: %w", err)
+		return nil, -1, fmt.Errorf("decode response: %w", err)
 	}
-	return &out, nil
+	return &out, 0, nil
+}
+
+// retryAfter reads the server's requested delay, capped so one throttled
+// request cannot stall a worker for minutes.
+func retryAfter(resp *http.Response) time.Duration {
+	secs, err := strconv.Atoi(resp.Header.Get("retry-after"))
+	if err != nil || secs <= 0 {
+		return 0
+	}
+	return min(time.Duration(secs)*time.Second, 30*time.Second)
+}
+
+// backoff grows exponentially from 1s, jittered by attempt so concurrent
+// workers throttled together do not retry in lockstep.
+func backoff(attempt int) time.Duration {
+	d := time.Duration(1<<uint(attempt-1)) * time.Second
+	return min(d, 16*time.Second) + time.Duration(attempt*137)*time.Millisecond
+}
+
+func sleep(ctx context.Context, d time.Duration) error {
+	t := time.NewTimer(d)
+	defer t.Stop()
+	select {
+	case <-ctx.Done():
+		return ctx.Err()
+	case <-t.C:
+		return nil
+	}
 }
 
 func truncate(s string, n int) string {

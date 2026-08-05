@@ -76,6 +76,7 @@ news stats            print collection stats
 | `NEWS_DB` | `data/news.db` | SQLite path. Point at a mounted volume in prod. |
 | `NEWS_REFRESH_MINUTES` | `0` | If >0, the server ingests+enriches+re-themes on this interval. |
 | `NEWS_SOURCE_LIMIT` | `40` | Max items each source query pulls per run. |
+| `NEWS_ENRICH_WORKERS` | `32` | Concurrent enrichment requests. Rate-limited requests are retried with backoff, so this can exceed sustained throughput. |
 | `NEWS_ENRICH_MODEL` | `claude-sonnet-5` | Per-item enrichment (high volume → Sonnet). |
 | `NEWS_THEME_MODEL` | `claude-sonnet-5` | Theme clustering. |
 | `NEWS_ASK_MODEL` | `claude-opus-5` | The interactive research agent (depth + tools). |

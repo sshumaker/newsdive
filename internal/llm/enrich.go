@@ -91,7 +91,13 @@ func (c *Client) Enrich(ctx context.Context, model, interests string, it *store.
 
 	var r enrichResult
 	if err := json.Unmarshal([]byte(resp.Text()), &r); err != nil {
-		return fmt.Errorf("parse enrichment for %q: %w", it.Title, err)
+		return fmt.Errorf("parse enrichment for %q (stop=%s): %w", it.Title, resp.StopReason, err)
+	}
+	// A truncated or otherwise hollow response can still parse as valid JSON.
+	// Reject it so the item stays pending and a later run retries it, rather
+	// than being marked enriched with an empty body it can never recover from.
+	if strings.TrimSpace(r.Summary) == "" || strings.TrimSpace(r.OneLiner) == "" {
+		return fmt.Errorf("empty enrichment for %q (stop=%s)", it.Title, resp.StopReason)
 	}
 
 	it.OneLiner = r.OneLiner

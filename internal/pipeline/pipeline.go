@@ -16,7 +16,7 @@ import (
 
 // EnrichPending summarizes and scores up to `max` unenriched items, running the
 // (slow) LLM calls with bounded concurrency while DB writes serialize.
-func EnrichPending(ctx context.Context, st *store.Store, cl *llm.Client, model, interests string, max int) (int, error) {
+func EnrichPending(ctx context.Context, st *store.Store, cl *llm.Client, model, interests string, max, workers int) (int, error) {
 	pending, err := st.PendingEnrichment(max)
 	if err != nil {
 		return 0, err
@@ -24,8 +24,10 @@ func EnrichPending(ctx context.Context, st *store.Store, cl *llm.Client, model, 
 	if len(pending) == 0 {
 		return 0, nil
 	}
+	if workers > len(pending) {
+		workers = len(pending)
+	}
 
-	const workers = 4
 	var (
 		wg   sync.WaitGroup
 		mu   sync.Mutex
@@ -94,7 +96,7 @@ func RunAll(ctx context.Context, st *store.Store, cl *llm.Client, cfg *config.Co
 	}
 	log.Printf("ingest: fetched=%d inserted=%d", rep.Fetched, rep.Inserted)
 
-	n, err := EnrichPending(ctx, st, cl, cfg.EnrichModel, cfg.Interests, 200)
+	n, err := EnrichPending(ctx, st, cl, cfg.EnrichModel, cfg.Interests, 200, cfg.EnrichWorkers)
 	if err != nil {
 		return err
 	}

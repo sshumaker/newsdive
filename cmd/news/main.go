@@ -69,7 +69,7 @@ func main() {
 		if len(os.Args) > 2 {
 			max, _ = strconv.Atoi(os.Args[2])
 		}
-		n, err := pipeline.EnrichPending(ctx, st, cl, cfg.EnrichModel, cfg.Interests, max)
+		n, err := pipeline.EnrichPending(ctx, st, cl, cfg.EnrichModel, cfg.Interests, max, cfg.EnrichWorkers)
 		if err != nil {
 			log.Fatalf("enrich: %v", err)
 		}
