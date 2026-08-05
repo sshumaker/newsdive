@@ -135,7 +135,12 @@ func main() {
 		ch := agent.NewChat(cfg.AnthropicAPIKey, st, cfg.AskModel)
 		cctx, cancel := context.WithTimeout(ctx, 5*time.Minute)
 		defer cancel()
-		r, err := ch.Send(cctx, "", os.Args[2], page)
+		// Tool activity goes to stderr so stdout stays just the answer.
+		r, err := ch.Send(cctx, "", os.Args[2], page, func(p agent.Progress) {
+			if p.Type == "tool" {
+				fmt.Fprintf(os.Stderr, "· %s\n", p.Tool)
+			}
+		})
 		if err != nil && (r == nil || r.Text == "") {
 			log.Fatalf("chat: %v", err)
 		}

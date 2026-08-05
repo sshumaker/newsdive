@@ -282,27 +282,76 @@ function renderChat() {
   }
   box.innerHTML = chat.messages.map((m) => {
     if (m.role === "user") return `<div class="msg user">${esc(m.text)}</div>`;
-    if (m.role === "thinking") return `<div class="msg bot thinking"><span class="pulse"></span> thinking…</div>`;
+    if (m.role === "thinking") {
+      const label = m.tool ? `using <b>${esc(m.tool)}</b>…` : "thinking…";
+      const partial = m.text ? `<div class="msg bot partial">${mdLite(m.text)}</div>` : "";
+      return `${partial}<div class="msg bot thinking"><span class="pulse"></span> ${label}</div>`;
+    }
     return `<div class="msg bot">${mdLite(m.text)}</div>`;
   }).join("");
   box.scrollTop = box.scrollHeight;
 }
+
+// Read an SSE stream, invoking onEvent(name, data) per frame. Used instead of
+// EventSource because the request needs to POST a body.
+async function streamSSE(url, payload, onEvent) {
+  const res = await fetch(url, {
+    method: "POST",
+    headers: { "content-type": "application/json", accept: "text/event-stream" },
+    body: JSON.stringify(payload),
+  });
+  if (!res.ok) throw new Error(await res.text() || res.statusText);
+  const reader = res.body.getReader();
+  const decoder = new TextDecoder();
+  let buf = "";
+  for (;;) {
+    const { value, done } = await reader.read();
+    if (done) break;
+    buf += decoder.decode(value, { stream: true });
+    // Frames are separated by a blank line; keep any partial tail buffered.
+    const frames = buf.split("\n\n");
+    buf = frames.pop();
+    for (const frame of frames) {
+      let name = "message", data = "";
+      for (const line of frame.split("\n")) {
+        if (line.startsWith("event:")) name = line.slice(6).trim();
+        else if (line.startsWith("data:")) data += line.slice(5).trim();
+      }
+      if (data) onEvent(name, JSON.parse(data));
+    }
+  }
+}
+
 async function sendChat() {
   const input = document.getElementById("chatInput");
   const q = input.value.trim();
   if (!q) return;
   input.value = ""; input.style.height = "auto";
   chat.messages.push({ role: "user", text: q });
-  chat.messages.push({ role: "thinking" });
+  const pending = { role: "thinking", text: "", tool: "" };
+  chat.messages.push(pending);
   renderChat();
   document.getElementById("chatSend").disabled = true;
   try {
-    const r = await post("/api/chat", { session_id: chat.id, message: q, context: chat.ctx });
-    chat.id = r.session_id;
-    chat.messages.pop();
-    chat.messages.push({ role: "bot", text: r.text || "(no reply)" });
+    await streamSSE("/api/chat", { session_id: chat.id, message: q, context: chat.ctx }, (name, d) => {
+      if (name === "progress" && d.type === "text") { pending.text += d.text; pending.tool = ""; }
+      else if (name === "progress" && d.type === "tool") pending.tool = d.tool;
+      else if (name === "progress" && d.type === "session") chat.id = d.id;
+      else if (name === "done") {
+        chat.id = d.session_id || chat.id;
+        const i = chat.messages.indexOf(pending);
+        if (i >= 0) chat.messages.splice(i, 1, { role: "bot", text: d.text || "(no reply)" });
+      } else if (name === "error") {
+        chat.messages.push({ role: "bot", text: "Error: " + d.error });
+      } else return;
+      renderChat();
+    });
+    // Stream ended without a terminal frame — keep whatever text arrived.
+    const i = chat.messages.indexOf(pending);
+    if (i >= 0) chat.messages.splice(i, 1, { role: "bot", text: pending.text || "(no reply)" });
   } catch (e) {
-    chat.messages.pop();
+    const i = chat.messages.indexOf(pending);
+    if (i >= 0) chat.messages.splice(i, 1);
     chat.messages.push({ role: "bot", text: "Error: " + e.message });
   } finally {
     document.getElementById("chatSend").disabled = false;

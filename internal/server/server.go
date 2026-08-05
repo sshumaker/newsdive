@@ -6,9 +6,11 @@ import (
 	"database/sql"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"log"
 	"net/http"
 	"strconv"
+	"strings"
 	"sync"
 	"time"
 
@@ -228,16 +230,53 @@ func (s *Server) handleChat(w http.ResponseWriter, r *http.Request) {
 	ctx, cancel := context.WithTimeout(r.Context(), 5*time.Minute)
 	defer cancel()
 
-	reply, err := s.chat.Send(ctx, body.SessionID, body.Message, body.Context)
-	if err != nil {
-		if reply != nil && reply.Text != "" {
-			writeJSON(w, reply)
+	// A turn can run for minutes behind tool calls. Stream progress when the
+	// client asks for it; keep the single-shot JSON reply for the CLI.
+	flusher, _ := w.(http.Flusher)
+	if !strings.Contains(r.Header.Get("Accept"), "text/event-stream") || flusher == nil {
+		reply, err := s.chat.Send(ctx, body.SessionID, body.Message, body.Context, nil)
+		if err != nil {
+			if reply != nil && reply.Text != "" {
+				writeJSON(w, reply)
+				return
+			}
+			fail(w, err)
 			return
 		}
-		fail(w, err)
+		writeJSON(w, reply)
 		return
 	}
-	writeJSON(w, reply)
+
+	w.Header().Set("Content-Type", "text/event-stream")
+	w.Header().Set("Cache-Control", "no-cache")
+	w.Header().Set("X-Accel-Buffering", "no") // don't let a proxy buffer the stream
+	w.WriteHeader(http.StatusOK)
+
+	send := func(event string, payload any) {
+		b, err := json.Marshal(payload)
+		if err != nil {
+			return
+		}
+		fmt.Fprintf(w, "event: %s\ndata: %s\n\n", event, b)
+		flusher.Flush()
+	}
+	send("open", map[string]string{})
+
+	reply, err := s.chat.Send(ctx, body.SessionID, body.Message, body.Context, func(p agent.Progress) {
+		send("progress", p)
+	})
+	switch {
+	case err != nil && (reply == nil || reply.Text == ""):
+		log.Printf("chat: %v", err)
+		send("error", map[string]string{"error": err.Error()})
+	case err != nil:
+		// Partial answer plus a failure: deliver what we have, flag the rest.
+		log.Printf("chat (partial): %v", err)
+		send("done", reply)
+		send("error", map[string]string{"error": err.Error()})
+	default:
+		send("done", reply)
+	}
 }
 
 // ---------- sources config ----------

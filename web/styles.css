@@ -150,7 +150,10 @@ a:active { opacity: .7; }
 .answer .cites h4 { font-size: 11.5px; text-transform: uppercase; letter-spacing: .7px; color: var(--accent); margin: 0 0 8px; }
 .answer .cites a { display: block; font-size: 13.5px; margin: 4px 0; }
 .thinking { display: flex; align-items: center; gap: 10px; color: var(--text-dim); padding: 20px 4px; }
-.thinking .pulse { width: 10px; height: 10px; border-radius: 50%; background: var(--accent); animation: pulse 1.1s ease-in-out infinite; }
+/* will-change keeps the dot on its own compositor layer so its animation
+   repaints only itself, not the surrounding sheet. */
+.thinking .pulse { width: 10px; height: 10px; border-radius: 50%; background: var(--accent); animation: pulse 1.1s ease-in-out infinite; will-change: opacity, transform; }
+.msg.bot.partial { opacity: .85; }
 @keyframes pulse { 0%,100% { opacity: .3; transform: scale(.8);} 50% { opacity: 1; transform: scale(1.2);} }
 .examples { display: flex; flex-direction: column; gap: 8px; margin-top: 6px; }
 .example { text-align: left; background: var(--bg-elev); border: 1px solid var(--border); color: var(--text-dim); border-radius: 10px; padding: 11px 13px; font-size: 13.5px; cursor: pointer; }
@@ -189,8 +192,14 @@ a:active { opacity: .7; }
 /* ---------- bottom sheets ---------- */
 .overlay {
   position: fixed; inset: 0; z-index: 50; display: none;
-  background: rgba(0,0,0,.5); backdrop-filter: blur(2px);
+  /* No backdrop-filter here: the sheet holds an infinitely animating element
+     (.thinking .pulse), and an animating descendant forces the compositor to
+     re-snapshot the blurred backdrop every frame — which intermittently paints
+     the page underneath unfiltered, i.e. content flickering through. The scrim
+     alone gives the same separation. */
+  background: rgba(0,0,0,.6);
   align-items: flex-end; justify-content: center;
+  isolation: isolate;
 }
 .overlay.open { display: flex; }
 .sheet {

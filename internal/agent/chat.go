@@ -127,9 +127,22 @@ type Reply struct {
 	Text      string `json:"text"`
 }
 
+// Progress reports turn activity as it happens. A turn can run for minutes
+// when the agent searches the web, so callers stream these to show real
+// movement instead of an indefinite spinner.
+type Progress struct {
+	Type string `json:"type"` // "text" (delta) | "tool" (name started) | "session"
+	Text string `json:"text,omitempty"`
+	Tool string `json:"tool,omitempty"`
+	ID   string `json:"id,omitempty"` // session id, on "session"
+}
+
 // Send handles one chat turn: starts a session if needed (seeding page context),
 // sends the message, and drains the agent's turn (running custom tools).
-func (c *Chat) Send(ctx context.Context, sessionID, message string, page PageContext) (*Reply, error) {
+//
+// onEvent, if non-nil, receives incremental progress; it is called from this
+// goroutine, so it must not block for long.
+func (c *Chat) Send(ctx context.Context, sessionID, message string, page PageContext, onEvent func(Progress)) (*Reply, error) {
 	if err := c.ensureSetup(ctx); err != nil {
 		return nil, err
 	}
@@ -158,17 +171,26 @@ func (c *Chat) Send(ctx context.Context, sessionID, message string, page PageCon
 		toSend = fmt.Sprintf("[Context: I'm currently viewing the %s \"%s\". Use read_current_topic for its details.]\n\n%s",
 			page.Kind, page.Title, message)
 	}
+	emit := func(p Progress) {
+		if onEvent != nil {
+			onEvent(p)
+		}
+	}
+	// Report the session id up front so a client that disconnects mid-turn can
+	// still resume the conversation rather than orphaning the session.
+	emit(Progress{Type: "session", ID: sessionID})
+
 	if err := c.cl.SendMessage(ctx, sessionID, toSend); err != nil {
 		return nil, err
 	}
 
-	text, err := c.drainTurn(ctx, sessionID, ss)
+	text, err := c.drainTurn(ctx, sessionID, ss, emit)
 	return &Reply{SessionID: sessionID, Text: strings.TrimSpace(text)}, err
 }
 
 // drainTurn polls the event stream until the turn completes, executing custom
 // tool calls (read_current_topic / search_corpus) as they arrive.
-func (c *Chat) drainTurn(ctx context.Context, sessionID string, ss *sessState) (string, error) {
+func (c *Chat) drainTurn(ctx context.Context, sessionID string, ss *sessState, emit func(Progress)) (string, error) {
 	var reply strings.Builder
 	emptyIdle := 0
 
@@ -190,13 +212,28 @@ func (c *Chat) drainTurn(ctx context.Context, sessionID string, ss *sessState) (
 			ss.processed[e.ID] = true
 			switch {
 			case strings.HasSuffix(e.Type, "agent.message"), e.Type == "agent.message":
-				for _, b := range e.Content {
-					if b.Type == "text" {
-						reply.WriteString(b.Text)
+				// A turn with tool calls produces several message events. Separate
+				// them, or the preamble runs into the answer ("...collection.Both
+				// arXiv fetches..."). Blocks *within* one event are contiguous.
+				for i, b := range e.Content {
+					if b.Type != "text" {
+						continue
 					}
+					text := b.Text
+					if i == 0 && reply.Len() > 0 {
+						text = "\n\n" + text
+					}
+					reply.WriteString(text)
+					emit(Progress{Type: "text", Text: text})
 				}
 			case strings.Contains(e.Type, "custom_tool_use"):
 				pending = append(pending, e)
+				emit(Progress{Type: "tool", Tool: e.Name})
+			// Server-side tools (web_search / web_fetch) arrive as agent.tool_use
+			// and run without us; surfacing them is what makes a long turn legible.
+			// Must stay below the custom case, which its type also matches.
+			case strings.Contains(e.Type, "tool_use"):
+				emit(Progress{Type: "tool", Tool: e.Name})
 			case strings.Contains(e.Type, "status_terminated"):
 				done = true
 			case strings.Contains(e.Type, "status_idle"):
